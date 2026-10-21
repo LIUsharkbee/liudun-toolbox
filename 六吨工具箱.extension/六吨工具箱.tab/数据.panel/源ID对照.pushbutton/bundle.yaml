@@ -1,0 +1,4 @@
+title: 源ID对照
+tooltip: 六吨工具箱 · 读“源ID”参数，导出 源ID/当前ID/类别/类型/标高 的 CSV，统计有源ID与无源ID、重复源ID
+author: 六吨工具箱
+min_revit_version: 2019

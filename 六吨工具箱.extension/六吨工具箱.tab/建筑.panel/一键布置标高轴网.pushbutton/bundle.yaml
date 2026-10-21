@@ -1,0 +1,4 @@
+title: 一键布置标高轴网
+tooltip: 六吨工具箱 · 参数或 CSV 批量生成标高、轴网，可指定起点、旋转角度，并自动创建楼层平面
+author: 六吨工具箱
+min_revit_version: 2019

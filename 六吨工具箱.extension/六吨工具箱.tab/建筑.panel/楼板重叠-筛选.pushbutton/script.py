@@ -1,15 +1,15 @@
 # -*- coding: utf-8 -*-
-"""楼板重叠处理
+"""楼板重叠处理（可筛选混凝土 / 垫层，也可含支护层）
 
 针对警告：“高亮显示的楼板重叠。”
 
-四种模式：
+三种模式：
   1. 只检查 / 定位：列出每对重叠板的 ID、类型、顶/底高程、厚度、面积、体积、重叠体积、判断；
-  2. 自动剪切：把较薄的一块嵌入较厚的一块（失败自动退回“连接几何图形”）；
-  3. 关闭较薄板的房间边界；
-  4. 删除较薄的一块（疑似重复板时用，带确认）。
+  2. 关闭较薄板的房间边界：选中多对时**批量执行，一个事务**（最省事，几何不动）；
+  3. 删除较薄的一块（疑似重复板时用，带确认）。
 
-每对楼板一个事务，Ctrl+Z 可撤销。
+说明：楼板之间不能互相剪切，所以不提供“自动剪切”模式。
+失败原因会以表格列出（编号 / 原因），便于排查锁定、工作共享等问题。
 """
 
 from __future__ import print_function
@@ -264,8 +264,7 @@ def main():
 
     mode = forms.CommandSwitchWindow.show(
         [u"只检查 / 定位",
-         u"自动剪切（薄板嵌入厚板）",
-         u"关闭较薄板的房间边界",
+         u"关闭较薄板的房间边界（选中项批量，一次事务）",
          u"删除较薄的一块（重复板）"],
         message=u"楼板重叠处理：选择要做什么")
     if not mode:
@@ -325,31 +324,67 @@ def main():
             return
 
     side = u"自动"
-    if mode == u"关闭较薄板的房间边界":
+    if mode.startswith(u"关闭较薄板"):
         side = forms.SelectFromList.show(
             [u"自动（关闭薄板）", u"关闭 A 侧", u"关闭 B 侧"],
             title=u"关闭哪一块的房间边界？", multiselect=False) or u"自动"
 
     ok_count = 0
     failures = []
-    for index, a, b, _ in targets:
-        if mode == u"自动剪切（薄板嵌入厚板）":
-            ok, msg = cut_pair(a, b)
-        elif mode == u"关闭较薄板的房间边界":
-            ok, msg = unbound_floor(a, b, side)
-        else:
+
+    if mode.startswith(u"关闭较薄板"):
+        key = bip("FLOOR_ATTR_ROOM_BOUNDING")
+        if key is None:
+            forms.alert(u"当前 Revit 版本没有楼板“房间边界”参数。")
+            return
+
+        todo = []
+        for index, a, b, _ in targets:
+            if side == u"关闭 A 侧":
+                target, keep = a, b
+            elif side == u"关闭 B 侧":
+                target, keep = b, a
+            else:
+                target, keep = thin_and_thick(a, b)
+
+            param = safe_call(lambda f=target["floor"]: f.get_Parameter(key), None)
+            if param is None:
+                failures.append((index, u"{0} 没有房间边界参数".format(target["eid"])))
+                continue
+            if safe_call(lambda p=param: p.IsReadOnly, False):
+                failures.append((index, u"{0} 的房间边界只读".format(target["eid"])))
+                continue
+            todo.append((index, target, param))
+
+        if todo:
+            try:
+                with revit.Transaction(u"批量关闭楼板房间边界"):
+                    for index, target, param in todo:
+                        param.Set(0)
+                        ok_count += 1
+            except Exception as ex:
+                ok_count = 0
+                failures.append((0, u"批量事务失败：{0}".format(ex)))
+
+    else:
+        for index, a, b, _ in targets:
             ok, msg = delete_floor(a, b)
-        if ok:
-            ok_count += 1
-        else:
-            failures.append(u"- {0}：{1}".format(index, msg))
+            if ok:
+                ok_count += 1
+            else:
+                failures.append((index, msg))
 
     left = len(floor_warning_pairs())
     output.print_md(u"### 结果")
     output.print_md(u"成功 {0} 个，失败 {1} 个；当前剩 {2} 对楼板重叠警告。".format(
         ok_count, len(failures), left))
+
     if failures:
-        output.print_md(u"\n".join(failures))
+        output.print_table(
+            [[i, reason] for i, reason in failures[:80]],
+            title=u"失败明细", columns=[u"编号", u"原因"])
+        output.print_md(u"\n提示：楼板之间不能互相剪切；删除失败通常是图元被锁定、"
+                        u"工作共享未检出，或属于链接模型。这类情况改用「关闭房间边界」即可。")
 
 
 try:

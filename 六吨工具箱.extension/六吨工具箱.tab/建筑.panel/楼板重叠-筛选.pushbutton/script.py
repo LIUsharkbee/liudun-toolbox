@@ -20,11 +20,13 @@ from Autodesk.Revit.DB import (
     BooleanOperationsType,
     BooleanOperationsUtils,
     BuiltInParameter,
+    ElementTransformUtils,
     Floor,
     JoinGeometryUtils,
     Options,
     Solid,
     SolidSolidCutUtils,
+    XYZ,
 )
 from pyrevit import revit, forms, script
 
@@ -182,6 +184,20 @@ def thin_and_thick(a, b):
     return (a, b) if a["thickness"] <= b["thickness"] else (b, a)
 
 
+def fit_delta(a, b):
+    """把薄板整体挪到厚板外侧，返回 (delta_mm, 方向, 目标标高)。"""
+    thin, thick = thin_and_thick(a, b)
+    if thin["bottom"] is None or thin["top"] is None:
+        return None
+    if thick["top"] is None or thick["bottom"] is None:
+        return None
+    if thin["bottom"] >= thick["bottom"]:
+        target = thick["top"]
+        return (target - thin["bottom"], u"上移", target)
+    target = thick["bottom"]
+    return (thick["bottom"] - thin["top"], u"下移", target)
+
+
 def cut_pair(a, b):
     thin, thick = thin_and_thick(a, b)
     if thin["solid"] is None or thick["solid"] is None:
@@ -283,6 +299,7 @@ def main():
 
     mode = forms.CommandSwitchWindow.show(
         [u"只检查 / 定位",
+         u"按标高贴合（把薄板移出厚板，先预览位移）",
          u"关闭较薄板的房间边界（不改几何，不会消除警告）",
          u"删除较薄的一块（重复板）"],
         message=u"楼板重叠处理：选择要做什么")
@@ -343,7 +360,58 @@ def main():
             return
 
     side = u"自动"
-    if mode.startswith(u"关闭较薄板"):
+    if mode.startswith(u"按标高贴合"):
+        preview_rows = []
+        todo = []
+        for index, a, b, _ in targets:
+            res = fit_delta(a, b)
+            thin, thick = thin_and_thick(a, b)
+            if res is None:
+                failures.append((index, u"{0} 取不到标高".format(thin["eid"])))
+                continue
+            delta, direction, target = res
+            preview_rows.append([
+                index,
+                output.linkify(thin["floor"].Id),
+                output.linkify(thick["floor"].Id),
+                u"{0:.0f} / {1:.0f}".format(thin["bottom"], thin["top"]),
+                u"{0:.0f} / {1:.0f}".format(thick["bottom"], thick["top"]),
+                direction,
+                u"{0:+.0f}".format(delta),
+            ])
+            if abs(delta) > 0.5:
+                todo.append((index, thin, delta))
+
+        output.print_table(
+            preview_rows, title=u"贴合预览（移动薄板，单位 mm）",
+            columns=[u"编号", u"薄板", u"厚板", u"薄板 底/顶",
+                     u"厚板 底/顶", u"方向", u"位移"])
+
+        output.print_md(u"注意：移动的是**整块板**。若两块板只在局部重叠，"
+                        u"整体升降可能让板在别处悬空或与别的构件相交——"
+                        u"先看预览的位移量，必要时只挑部分配对处理。")
+
+        if not todo:
+            output.print_md(u"没有需要移动的板（位移都小于 0.5 mm）。")
+        else:
+            choice = forms.SelectFromList.show(
+                [u"确认移动这 {0} 块板".format(len(todo)), u"取消"],
+                title=u"将按预览表的位移整体升降薄板\nCtrl+Z 可整体撤销",
+                multiselect=False)
+            if not choice or not choice.startswith(u"确认"):
+                return
+            try:
+                with revit.Transaction(u"按标高贴合楼板"):
+                    for index, thin, delta in todo:
+                        ElementTransformUtils.MoveElement(
+                            doc, thin["floor"].Id,
+                            XYZ(0.0, 0.0, delta / FT_TO_MM))
+                        ok_count += 1
+            except Exception as ex:
+                ok_count = 0
+                failures.append((0, u"批量移动失败：{0}".format(ex)))
+
+    elif mode.startswith(u"关闭较薄板"):
         side = forms.SelectFromList.show(
             [u"自动（关闭薄板）", u"关闭 A 侧", u"关闭 B 侧"],
             title=u"关闭哪一块的房间边界？", multiselect=False) or u"自动"
@@ -351,7 +419,58 @@ def main():
     ok_count = 0
     failures = []
 
-    if mode.startswith(u"关闭较薄板"):
+    if mode.startswith(u"按标高贴合"):
+        preview_rows = []
+        todo = []
+        for index, a, b, _ in targets:
+            res = fit_delta(a, b)
+            thin, thick = thin_and_thick(a, b)
+            if res is None:
+                failures.append((index, u"{0} 取不到标高".format(thin["eid"])))
+                continue
+            delta, direction, target = res
+            preview_rows.append([
+                index,
+                output.linkify(thin["floor"].Id),
+                output.linkify(thick["floor"].Id),
+                u"{0:.0f} / {1:.0f}".format(thin["bottom"], thin["top"]),
+                u"{0:.0f} / {1:.0f}".format(thick["bottom"], thick["top"]),
+                direction,
+                u"{0:+.0f}".format(delta),
+            ])
+            if abs(delta) > 0.5:
+                todo.append((index, thin, delta))
+
+        output.print_table(
+            preview_rows, title=u"贴合预览（移动薄板，单位 mm）",
+            columns=[u"编号", u"薄板", u"厚板", u"薄板 底/顶",
+                     u"厚板 底/顶", u"方向", u"位移"])
+
+        output.print_md(u"注意：移动的是**整块板**。若两块板只在局部重叠，"
+                        u"整体升降可能让板在别处悬空或与别的构件相交——"
+                        u"先看预览的位移量，必要时只挑部分配对处理。")
+
+        if not todo:
+            output.print_md(u"没有需要移动的板（位移都小于 0.5 mm）。")
+        else:
+            choice = forms.SelectFromList.show(
+                [u"确认移动这 {0} 块板".format(len(todo)), u"取消"],
+                title=u"将按预览表的位移整体升降薄板\nCtrl+Z 可整体撤销",
+                multiselect=False)
+            if not choice or not choice.startswith(u"确认"):
+                return
+            try:
+                with revit.Transaction(u"按标高贴合楼板"):
+                    for index, thin, delta in todo:
+                        ElementTransformUtils.MoveElement(
+                            doc, thin["floor"].Id,
+                            XYZ(0.0, 0.0, delta / FT_TO_MM))
+                        ok_count += 1
+            except Exception as ex:
+                ok_count = 0
+                failures.append((0, u"批量移动失败：{0}".format(ex)))
+
+    elif mode.startswith(u"关闭较薄板"):
         todo = []
         for index, a, b, _ in targets:
             if side == u"关闭 A 侧":

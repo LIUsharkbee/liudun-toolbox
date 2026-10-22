@@ -43,6 +43,24 @@ def safe_call(fn, default=None):
         return default
 
 
+ROOM_BOUNDING_NAMES = (u"房间边界", u"Room Bounding")
+
+def room_bounding_param(elem):
+    """按内置参数名 / 参数中文名找“房间边界”，兼容不同版本与语言。"""
+    for name in ("FLOOR_ATTR_ROOM_BOUNDING", "ROOM_BOUNDING", "HOST_ROOM_BOUNDING"):
+        key = getattr(BuiltInParameter, name, None)
+        if key is None:
+            continue
+        param = safe_call(lambda k=key: elem.get_Parameter(k), None)
+        if param is not None:
+            return param
+    for param in safe_call(lambda: list(elem.Parameters), []):
+        pname = safe_call(lambda p=param: p.Definition.Name, u"") or u""
+        if pname in ROOM_BOUNDING_NAMES:
+            return param
+    return None
+
+
 def bip(name):
     """按名字取 BuiltInParameter，取不到返回 None。"""
     return getattr(BuiltInParameter, name, None)
@@ -83,10 +101,7 @@ def param_number(elem, name, factor=1.0):
 
 
 def room_bounding(elem):
-    key = bip("FLOOR_ATTR_ROOM_BOUNDING")
-    if key is None:
-        return u"?"
-    param = safe_call(lambda: elem.get_Parameter(key), None)
+    param = room_bounding_param(elem)
     if param is None:
         return u"?"
     return u"是" if param.AsInteger() else u"否"
@@ -191,10 +206,7 @@ def unbound_floor(a, b, side=u"自动"):
         target, keep = b, a
     else:
         target, keep = thin_and_thick(a, b)
-    key = bip("FLOOR_ATTR_ROOM_BOUNDING")
-    if key is None:
-        return False, u"当前版本没有楼板房间边界参数"
-    param = target["floor"].get_Parameter(key)
+    param = room_bounding_param(target["floor"])
     if param is None:
         return False, u"{0} 没有房间边界参数".format(target["eid"])
     if safe_call(lambda: param.IsReadOnly, False):
@@ -340,11 +352,6 @@ def main():
     failures = []
 
     if mode.startswith(u"关闭较薄板"):
-        key = bip("FLOOR_ATTR_ROOM_BOUNDING")
-        if key is None:
-            forms.alert(u"当前 Revit 版本没有楼板“房间边界”参数。")
-            return
-
         todo = []
         for index, a, b, _ in targets:
             if side == u"关闭 A 侧":
@@ -354,7 +361,7 @@ def main():
             else:
                 target, keep = thin_and_thick(a, b)
 
-            param = safe_call(lambda f=target["floor"]: f.get_Parameter(key), None)
+            param = room_bounding_param(target["floor"])
             if param is None:
                 failures.append((index, u"{0} 没有房间边界参数".format(target["eid"])))
                 continue

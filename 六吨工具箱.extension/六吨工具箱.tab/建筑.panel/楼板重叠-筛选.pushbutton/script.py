@@ -185,17 +185,30 @@ def thin_and_thick(a, b):
 
 
 def fit_delta(a, b):
-    """把薄板整体挪到厚板外侧，返回 (delta_mm, 方向, 目标标高)。"""
+    """返回 (状态, delta_mm, 方向, 目标标高)。
+
+    状态：
+      ok        —— 可以把薄板整体挪到厚板外侧；
+      contained —— 薄板完全夹在厚板厚度范围内，整体移动是错误操作；
+      unknown   —— 取不到标高。
+    """
     thin, thick = thin_and_thick(a, b)
     if thin["bottom"] is None or thin["top"] is None:
-        return None
+        return ("unknown", None, None, None)
     if thick["top"] is None or thick["bottom"] is None:
-        return None
+        return ("unknown", None, None, None)
+
+    tolerance = 0.5
+    contained = (thin["bottom"] > thick["bottom"] + tolerance
+                 and thin["top"] < thick["top"] - tolerance)
+    if contained:
+        return ("contained", None, u"夹在中间", None)
+
     if thin["bottom"] >= thick["bottom"]:
         target = thick["top"]
-        return (target - thin["bottom"], u"上移", target)
+        return ("ok", target - thin["bottom"], u"上移", target)
     target = thick["bottom"]
-    return (thick["bottom"] - thin["top"], u"下移", target)
+    return ("ok", thick["bottom"] - thin["top"], u"下移", target)
 
 
 def cut_pair(a, b):
@@ -371,22 +384,28 @@ def main():
     if mode.startswith(u"按标高贴合"):
         preview_rows = []
         todo = []
+        manual = []
         for index, a, b, _ in targets:
-            res = fit_delta(a, b)
+            status, delta, direction, target = fit_delta(a, b)
             thin, thick = thin_and_thick(a, b)
-            if res is None:
+            if status == "unknown":
                 failures.append((index, u"{0} 取不到标高".format(thin["eid"])))
                 continue
-            delta, direction, target = res
-            preview_rows.append([
+
+            base_row = [
                 index,
                 output.linkify(thin["floor"].Id),
                 output.linkify(thick["floor"].Id),
                 u"{0:.0f} / {1:.0f}".format(thin["bottom"], thin["top"]),
                 u"{0:.0f} / {1:.0f}".format(thick["bottom"], thick["top"]),
-                direction,
-                u"{0:+.0f}".format(delta),
-            ])
+            ]
+
+            if status == "contained":
+                manual.append(index)
+                preview_rows.append(base_row + [u"夹在中间", u"—"])
+                continue
+
+            preview_rows.append(base_row + [direction, u"{0:+.0f}".format(delta)])
             if abs(delta) > 0.5:
                 todo.append((index, thin, delta))
 
@@ -394,6 +413,14 @@ def main():
             preview_rows, title=u"贴合预览（移动薄板，单位 mm）",
             columns=[u"编号", u"薄板", u"厚板", u"薄板 底/顶",
                      u"厚板 底/顶", u"方向", u"位移"])
+
+        if manual:
+            output.print_md(u"其中 {0} 对（编号 {1}）的薄板**夹在厚板厚度范围内**，"
+                            u"整体移动会把它抬到厚板外面，属于错误操作，已自动跳过。\n"
+                            u"这几对应在剖面里用「修改子图元」把重叠区域压到厚板底以下，"
+                            u"或拆分后删掉重叠块。".format(
+                                len(manual),
+                                u"、".join(u"#{0}".format(i) for i in manual)))
 
         output.print_md(u"注意：移动的是**整块板**。若两块板只在局部重叠，"
                         u"整体升降可能让板在别处悬空或与别的构件相交——"

@@ -209,12 +209,19 @@ def unbound_floor(a, b, side=u"自动"):
         return False, u"设置失败：{0}".format(ex)
 
 
-def delete_floor(a, b):
+def delete_floor(a, b, unpin=False):
     thin, _ = thin_and_thick(a, b)
+    floor = thin["floor"]
+    is_pinned = bool(safe_call(lambda: floor.Pinned, False))
+    if is_pinned and not unpin:
+        return False, u"{0} 已锁定，未解锁，已跳过".format(thin["eid"])
     try:
         with revit.Transaction(u"删除楼板 {0}".format(thin["eid"])):
-            doc.Delete(thin["floor"].Id)
-        return True, u"已删除 {0}（{1}）".format(thin["eid"], thin["type"])
+            if is_pinned and unpin:
+                floor.Pinned = False
+            doc.Delete(floor.Id)
+        suffix = u"（已先解锁）" if is_pinned and unpin else u""
+        return True, u"已删除 {0}（{1}）{2}".format(thin["eid"], thin["type"], suffix)
     except Exception as ex:
         return False, u"删除失败：{0}".format(ex)
 
@@ -360,6 +367,26 @@ def main():
             [u"自动（关闭薄板）", u"关闭 A 侧", u"关闭 B 侧"],
             title=u"关闭哪一块的房间边界？", multiselect=False) or u"自动"
 
+    unpin = False
+    if mode == u"删除较薄的一块（重复板）":
+        pinned = []
+        for index, a, b, _ in targets:
+            thin, _thick = thin_and_thick(a, b)
+            if safe_call(lambda f=thin["floor"]: f.Pinned, False):
+                pinned.append((index, thin))
+        if pinned:
+            choice = forms.SelectFromList.show(
+                [u"先解锁这 {0} 块，再删除".format(len(pinned)),
+                 u"跳过锁定的，只删没锁的",
+                 u"取消"],
+                title=u"有 {0} 块楼板是锁定的（图钉）：\n{1}".format(
+                    len(pinned),
+                    u"、".join(u"#{0}".format(i) for i, _ in pinned)),
+                multiselect=False)
+            if not choice or choice.startswith(u"取消"):
+                return
+            unpin = choice.startswith(u"先解锁")
+
     ok_count = 0
     failures = []
     for index, a, b, _ in targets:
@@ -368,18 +395,20 @@ def main():
         elif mode == u"关闭较薄板的房间边界":
             ok, msg = unbound_floor(a, b, side)
         else:
-            ok, msg = delete_floor(a, b)
+            ok, msg = delete_floor(a, b, unpin=unpin)
         if ok:
             ok_count += 1
         else:
-            failures.append(u"- {0}：{1}".format(index, msg))
+            failures.append((index, msg))
 
     left = len(floor_warning_pairs())
     output.print_md(u"### 结果")
     output.print_md(u"成功 {0} 个，失败 {1} 个；当前剩 {2} 对楼板重叠警告。".format(
         ok_count, len(failures), left))
     if failures:
-        output.print_md(u"\n".join(failures))
+        output.print_table(
+            [[i, reason] for i, reason in failures[:80]],
+            title=u"失败明细", columns=[u"编号", u"原因"])
 
 
 try:

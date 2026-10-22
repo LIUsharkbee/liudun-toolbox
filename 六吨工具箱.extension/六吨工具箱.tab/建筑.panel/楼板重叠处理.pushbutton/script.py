@@ -3,11 +3,12 @@
 
 针对警告：“高亮显示的楼板重叠。”
 
-四种模式：
+五种模式：
   1. 只检查 / 定位：列出每对重叠板的 ID、类型、顶/底高程、厚度、面积、体积、重叠体积、判断；
   2. 自动剪切：把较薄的一块嵌入较厚的一块（失败自动退回“连接几何图形”）；
   3. 关闭较薄板的房间边界；
-  4. 删除较薄的一块（疑似重复板时用，带确认）。
+  4. 删除较薄的一块（疑似重复板时用，带确认）；
+  5. 批量关闭支护 / 土方类板的房间边界（按类型名关键词，一次处理整批）。
 
 每对楼板一个事务，Ctrl+Z 可撤销。
 """
@@ -20,6 +21,7 @@ from Autodesk.Revit.DB import (
     BooleanOperationsType,
     BooleanOperationsUtils,
     BuiltInParameter,
+    FilteredElementCollector,
     Floor,
     JoinGeometryUtils,
     Options,
@@ -217,6 +219,69 @@ def delete_floor(a, b):
         return False, u"删除失败：{0}".format(ex)
 
 
+SUPPORT_WORDS = (u"喷射", u"喷锚", u"土方", u"土料", u"褥垫", u"碎石",
+                 u"土壤", u"素土", u"支护", u"回填")
+
+def type_name_of(floor):
+    type_elem = safe_call(lambda: doc.GetElement(floor.GetTypeId()), None)
+    return safe_call(lambda: type_elem.Name, u"") if type_elem is not None else u""
+
+def batch_unbind_support():
+    floors = [f for f in FilteredElementCollector(doc).OfClass(Floor)
+              if any(w in type_name_of(f) for w in SUPPORT_WORDS)]
+    if not floors:
+        forms.alert(u"没有找到名称含支护 / 土方关键词的楼板。")
+        return
+
+    key = bip("FLOOR_ATTR_ROOM_BOUNDING")
+    if key is None:
+        forms.alert(u"当前 Revit 版本没有楼板“房间边界”参数。")
+        return
+
+    rows = []
+    targets = []
+    for floor in floors:
+        param = safe_call(lambda f=floor: f.get_Parameter(key), None)
+        if param is None:
+            continue
+        is_on = bool(param.AsInteger())
+        rows.append([output.linkify(floor.Id), type_name_of(floor),
+                     u"是" if is_on else u"否"])
+        if is_on:
+            targets.append((floor, param))
+
+    output.print_md(u"## 支护 / 土方类楼板")
+    output.print_table(rows, title=u"匹配到的楼板",
+                       columns=[u"ID", u"类型", u"房间边界"])
+    if not targets:
+        output.print_md(u"这些板的房间边界已经是“否”，无需处理。")
+        return
+
+    choice = forms.SelectFromList.show(
+        [u"确认关闭 {0} 块的房间边界".format(len(targets)), u"取消"],
+        title=u"将把列表中“房间边界=是”的 {0} 块板改成“否”".format(len(targets)),
+        multiselect=False)
+    if not choice or not choice.startswith(u"确认"):
+        return
+
+    ok = 0
+    failures = []
+    with revit.Transaction(u"批量关闭支护类房间边界"):
+        for floor, param in targets:
+            try:
+                param.Set(0)
+                ok += 1
+            except Exception as ex:
+                failures.append(u"- {0}：{1}".format(floor.Id.IntegerValue, ex))
+
+    left = len(floor_warning_pairs())
+    output.print_md(u"### 结果")
+    output.print_md(u"成功 {0} 个，失败 {1} 个；当前剩 {2} 对楼板重叠警告。".format(
+        ok, len(failures), left))
+    if failures:
+        output.print_md(u"\n".join(failures))
+
+
 def main():
     if doc is None:
         forms.alert(u"请先打开一个项目。", exitscript=True)
@@ -230,9 +295,14 @@ def main():
         [u"只检查 / 定位",
          u"自动剪切（薄板嵌入厚板）",
          u"关闭较薄板的房间边界",
-         u"删除较薄的一块（重复板）"],
+         u"删除较薄的一块（重复板）",
+         u"批量关闭支护 / 土方类板的房间边界"],
         message=u"楼板重叠处理：选择要做什么")
     if not mode:
+        return
+
+    if mode == u"批量关闭支护 / 土方类板的房间边界":
+        batch_unbind_support()
         return
 
     rows = []

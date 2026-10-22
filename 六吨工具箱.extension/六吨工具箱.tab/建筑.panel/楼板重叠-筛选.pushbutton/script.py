@@ -243,8 +243,21 @@ def main():
         forms.alert(u"当前没有“楼板重叠”类警告。")
         return
 
-    pairs = [p for p in all_pairs if keep_pair(p[1], p[2])]
-    skipped = len(all_pairs) - len(pairs)
+    scope = forms.CommandSwitchWindow.show(
+        [u"只看混凝土 / 垫层（排除土方、喷锚、褥垫层）",
+         u"包含喷锚 / 土方等支护层（显示全部重叠对）"],
+        message=u"筛选范围：要看哪一类？")
+    if not scope:
+        return
+    include_support = scope.startswith(u"包含")
+
+    if include_support:
+        pairs = list(all_pairs)
+        skipped = 0
+    else:
+        pairs = [p for p in all_pairs if keep_pair(p[1], p[2])]
+        skipped = len(all_pairs) - len(pairs)
+
     if not pairs:
         forms.alert(u"过滤后没有混凝土 / 垫层类的重叠，已跳过 {0} 对土方、支护类。".format(skipped))
         return
@@ -277,8 +290,12 @@ def main():
             classify(a, b, volume),
         ])
 
-    output.print_md(u"## 楼板重叠检查（只列混凝土 / 垫层）")
-    output.print_md(u"共 {0} 对；已过滤掉 {1} 对土方、喷锚、褥垫层等。".format(len(data), skipped))
+    output.print_md(u"## 楼板重叠检查（{0}）".format(
+        u"含支护层" if include_support else u"只列混凝土 / 垫层"))
+    if include_support:
+        output.print_md(u"共 {0} 对（未过滤，含喷锚、土方、褥垫层等）。".format(len(data)))
+    else:
+        output.print_md(u"共 {0} 对；已过滤掉 {1} 对土方、喷锚、褥垫层等。".format(len(data), skipped))
     output.print_table(
         rows, title=u"重叠楼板",
         columns=[u"编号", u"板 A", u"板 B", u"A 类型", u"B 类型",

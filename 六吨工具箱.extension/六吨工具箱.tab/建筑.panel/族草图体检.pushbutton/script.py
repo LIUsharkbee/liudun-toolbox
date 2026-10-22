@@ -64,13 +64,23 @@ def family_and_type(instance):
 
 
 def sketch_warnings():
-    """返回 [(warning, 描述)]，只保留“偏离轴”类。"""
-    out = []
+    """返回 (匹配列表, 全部描述列表)，匹配“偏离轴”类。"""
+    all_descs = []
+    matched = []
     for warning in safe_call(lambda: list(doc.GetWarnings()), []):
         desc = safe_call(lambda w=warning: w.Description, u"") or u""
+        all_descs.append(desc)
         if u"偏离" in desc and u"轴" in desc:
-            out.append((warning, desc))
-    return out
+            matched.append((warning, desc))
+
+    if not matched:
+        # 放宽：只要提到“偏离”或“草图 + 轴”
+        for warning, desc in [(w, safe_call(lambda w=w: w.Description, u"") or u"")
+                              for w in safe_call(lambda: list(doc.GetWarnings()), [])]:
+            if u"偏离" in desc or (u"草图" in desc and u"轴" in desc):
+                matched.append((warning, desc))
+
+    return matched, all_descs
 
 
 def csv_cell(value):
@@ -93,9 +103,18 @@ def main():
     if doc is None:
         forms.alert(u"请先打开一个项目。", exitscript=True)
 
-    warnings = sketch_warnings()
+    warnings, all_descs = sketch_warnings()
     if not warnings:
-        forms.alert(u"当前没有“草图线偏离轴”类警告。")
+        output.print_md(u"## 族草图体检（未匹配）")
+        output.print_md(u"实施中的警告总数：**{0}**".format(len(all_descs)))
+        if all_descs:
+            output.print_md(u"\n前 15 条警告原文（用于核对用词）：")
+            for desc in all_descs[:15]:
+                output.print_md(u"- {0}".format((desc or u"").replace(u"\n", u" ")[:80]))
+        else:
+            output.print_md(u"`GetWarnings()` 返回空——可能当前没有未处理的警告，"
+                            u"或警告已被清空。")
+        output.print_md(u"\n如果上面出现过“偏离轴”字样，请把它原样发我，我按实际文字匹配。")
         return
 
     groups = {}

@@ -34,71 +34,71 @@ XAML = u"""
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="清理 Revit 备份文件"
-        Width="760" Height="640"
+        Width="780" Height="660" MinWidth="640" MinHeight="420"
         WindowStartupLocation="CenterScreen"
         ResizeMode="CanResize"
         ShowInTaskbar="False">
-  <Grid Margin="14">
-    <Grid.RowDefinitions>
-      <RowDefinition Height="Auto"/>
-      <RowDefinition Height="Auto"/>
-      <RowDefinition Height="*"/>
-      <RowDefinition Height="Auto"/>
-      <RowDefinition Height="Auto"/>
-    </Grid.RowDefinitions>
-
-    <TextBlock Grid.Row="0" Text="扫描目录" FontWeight="SemiBold" Margin="0,0,0,6"/>
-
-    <Grid Grid.Row="1" Margin="0,0,0,12">
-      <Grid.ColumnDefinitions>
-        <ColumnDefinition Width="*"/>
-        <ColumnDefinition Width="Auto"/>
-        <ColumnDefinition Width="Auto"/>
-      </Grid.ColumnDefinitions>
-      <TextBox x:Name="FolderBox" Grid.Column="0" Height="28"
-               VerticalContentAlignment="Center" Padding="4,2"/>
-      <Button x:Name="BrowseBtn" Grid.Column="1" Content="浏览…"
-              Width="76" Height="28" Margin="6,0,0,0"/>
-      <Button x:Name="ScanBtn" Grid.Column="2" Content="扫描"
-              Width="76" Height="28" Margin="6,0,0,0"/>
-    </Grid>
-
-    <TextBlock Grid.Row="2" Text="备份文件" FontWeight="SemiBold" Margin="0,0,0,6"/>
-
-    <Grid Grid.Row="2" Margin="0,26,0,0">
+  <ScrollViewer VerticalScrollBarVisibility="Auto"
+                HorizontalScrollBarVisibility="Disabled">
+    <Grid Margin="14">
       <Grid.RowDefinitions>
-        <RowDefinition Height="*"/>
+        <RowDefinition Height="Auto"/>
+        <RowDefinition Height="Auto"/>
+        <RowDefinition Height="Auto"/>
+        <RowDefinition Height="Auto"/>
+        <RowDefinition Height="Auto"/>
+        <RowDefinition Height="Auto"/>
         <RowDefinition Height="Auto"/>
       </Grid.RowDefinitions>
-      <ListBox x:Name="FileList" Grid.Row="0"
+
+      <TextBlock Grid.Row="0" Text="扫描目录" FontWeight="SemiBold" Margin="0,0,0,6"/>
+
+      <Grid Grid.Row="1" Margin="0,0,0,12">
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="*"/>
+          <ColumnDefinition Width="Auto"/>
+          <ColumnDefinition Width="Auto"/>
+        </Grid.ColumnDefinitions>
+        <TextBox x:Name="FolderBox" Grid.Column="0" Height="28"
+                 VerticalContentAlignment="Center" Padding="4,2"/>
+        <Button x:Name="BrowseBtn" Grid.Column="1" Content="浏览…"
+                Width="76" Height="28" Margin="6,0,0,0"/>
+        <Button x:Name="ScanBtn" Grid.Column="2" Content="扫描"
+                Width="76" Height="28" Margin="6,0,0,0"/>
+      </Grid>
+
+      <TextBlock Grid.Row="2" Text="备份文件" FontWeight="SemiBold" Margin="0,0,0,6"/>
+
+      <ListBox x:Name="FileList" Grid.Row="3" Height="320"
                SelectionMode="Extended"
                FontFamily="Consolas"
                ScrollViewer.VerticalScrollBarVisibility="Auto"/>
-      <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,8,0,0">
+
+      <StackPanel Grid.Row="4" Orientation="Horizontal" Margin="0,8,0,0">
         <Button x:Name="SelectAllBtn" Content="全选" Width="72" Height="28" Margin="0,0,8,0"/>
         <Button x:Name="ClearBtn" Content="全不选" Width="72" Height="28" Margin="0,0,8,0"/>
         <Button x:Name="OldBtn" Content="仅选 30 天前的" Width="128" Height="28"/>
       </StackPanel>
-    </Grid>
 
-    <CheckBox x:Name="RecycleCheck" Grid.Row="3"
-              Content="删除时移到回收站（取消勾选则永久删除）"
-              IsChecked="True" Margin="0,12,0,10"/>
+      <CheckBox x:Name="RecycleCheck" Grid.Row="5"
+                Content="删除时移到回收站（取消勾选则永久删除）"
+                IsChecked="True" Margin="0,12,0,10"/>
 
-    <Grid Grid.Row="4">
-      <Grid.ColumnDefinitions>
-        <ColumnDefinition Width="*"/>
-        <ColumnDefinition Width="Auto"/>
-        <ColumnDefinition Width="Auto"/>
-      </Grid.ColumnDefinitions>
-      <TextBlock x:Name="StatusText" Grid.Column="0"
-                 Text="尚未扫描" VerticalAlignment="Center"/>
-      <Button x:Name="DeleteBtn" Grid.Column="1" Content="删除选中"
-              Width="96" Height="30" Margin="8,0,0,0"/>
-      <Button x:Name="CloseBtn" Grid.Column="2" Content="关闭"
-              Width="72" Height="30" Margin="8,0,0,0"/>
+      <Grid Grid.Row="6">
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="*"/>
+          <ColumnDefinition Width="Auto"/>
+          <ColumnDefinition Width="Auto"/>
+        </Grid.ColumnDefinitions>
+        <TextBlock x:Name="StatusText" Grid.Column="0"
+                   Text="尚未扫描" VerticalAlignment="Center"/>
+        <Button x:Name="DeleteBtn" Grid.Column="1" Content="删除选中"
+                Width="96" Height="30" Margin="8,0,0,0"/>
+        <Button x:Name="CloseBtn" Grid.Column="2" Content="关闭"
+                Width="72" Height="30" Margin="8,0,0,0"/>
+      </Grid>
     </Grid>
-  </Grid>
+  </ScrollViewer>
 </Window>
 """
 

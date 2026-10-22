@@ -60,6 +60,7 @@ from System.Windows.Controls import (
     Label,
     Orientation,
     ScrollBarVisibility,
+    ScrollViewer,
     StackPanel,
     TextBox,
 )
@@ -84,8 +85,8 @@ FT_TO_MM = 304.8
 SHELL_XAML = u"""
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="一键布置标高轴网" Width="580" Height="680"
-        WindowStartupLocation="CenterScreen" ResizeMode="NoResize"
+        Title="一键布置标高轴网" Width="600" Height="700" MinWidth="520" MinHeight="420"
+        WindowStartupLocation="CenterScreen" ResizeMode="CanResize"
         ShowInTaskbar="False"/>
 """
 MARGIN = 1000.0            # 轴网端头外挑，mm
@@ -465,7 +466,11 @@ class SyncWindow(forms.WPFWindow):
         buttons.Children.Add(cancel_btn)
         root.Children.Add(buttons)
 
-        self.Content = root
+        scroller = ScrollViewer()
+        scroller.VerticalScrollBarVisibility = ScrollBarVisibility.Auto
+        scroller.HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled
+        scroller.Content = root
+        self.Content = scroller
         safe_call(self._update_preview)
 
     def _combo_item(self, text):

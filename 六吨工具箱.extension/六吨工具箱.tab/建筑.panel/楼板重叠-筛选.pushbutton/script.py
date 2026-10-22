@@ -360,58 +360,7 @@ def main():
             return
 
     side = u"自动"
-    if mode.startswith(u"按标高贴合"):
-        preview_rows = []
-        todo = []
-        for index, a, b, _ in targets:
-            res = fit_delta(a, b)
-            thin, thick = thin_and_thick(a, b)
-            if res is None:
-                failures.append((index, u"{0} 取不到标高".format(thin["eid"])))
-                continue
-            delta, direction, target = res
-            preview_rows.append([
-                index,
-                output.linkify(thin["floor"].Id),
-                output.linkify(thick["floor"].Id),
-                u"{0:.0f} / {1:.0f}".format(thin["bottom"], thin["top"]),
-                u"{0:.0f} / {1:.0f}".format(thick["bottom"], thick["top"]),
-                direction,
-                u"{0:+.0f}".format(delta),
-            ])
-            if abs(delta) > 0.5:
-                todo.append((index, thin, delta))
-
-        output.print_table(
-            preview_rows, title=u"贴合预览（移动薄板，单位 mm）",
-            columns=[u"编号", u"薄板", u"厚板", u"薄板 底/顶",
-                     u"厚板 底/顶", u"方向", u"位移"])
-
-        output.print_md(u"注意：移动的是**整块板**。若两块板只在局部重叠，"
-                        u"整体升降可能让板在别处悬空或与别的构件相交——"
-                        u"先看预览的位移量，必要时只挑部分配对处理。")
-
-        if not todo:
-            output.print_md(u"没有需要移动的板（位移都小于 0.5 mm）。")
-        else:
-            choice = forms.SelectFromList.show(
-                [u"确认移动这 {0} 块板".format(len(todo)), u"取消"],
-                title=u"将按预览表的位移整体升降薄板\nCtrl+Z 可整体撤销",
-                multiselect=False)
-            if not choice or not choice.startswith(u"确认"):
-                return
-            try:
-                with revit.Transaction(u"按标高贴合楼板"):
-                    for index, thin, delta in todo:
-                        ElementTransformUtils.MoveElement(
-                            doc, thin["floor"].Id,
-                            XYZ(0.0, 0.0, delta / FT_TO_MM))
-                        ok_count += 1
-            except Exception as ex:
-                ok_count = 0
-                failures.append((0, u"批量移动失败：{0}".format(ex)))
-
-    elif mode.startswith(u"关闭较薄板"):
+    if mode.startswith(u"关闭较薄板"):
         side = forms.SelectFromList.show(
             [u"自动（关闭薄板）", u"关闭 A 侧", u"关闭 B 侧"],
             title=u"关闭哪一块的房间边界？", multiselect=False) or u"自动"
@@ -516,9 +465,10 @@ def main():
                     len(pinned),
                     u"、".join(u"#{0}".format(i) for i, _ in pinned)),
                 multiselect=False)
-            if not choice or choice.startswith(u"取消"):
+            if not choice or not choice.startswith(u"取消"):
+                unpin = choice.startswith(u"先解锁")
+            else:
                 return
-            unpin = choice.startswith(u"先解锁")
 
         for index, a, b, _ in targets:
             ok, msg = delete_floor(a, b, unpin=unpin)

@@ -56,17 +56,24 @@ def desktop_dir():
 
 
 def family_and_type(instance):
+    """族名 / 类型名：先走 Symbol，取不到再退回参数值。"""
+    fam = u""
+    typ = u""
     sym = safe_call(lambda: instance.Symbol, None)
     if sym is not None:
-        fam = safe_call(lambda: sym.Family.Name, u"")
-        typ = safe_call(lambda: sym.Name, u"")
-        return (fam or u"?", typ or u"?")
-    fam = safe_call(
-        lambda: instance.get_Parameter(
-            BuiltInParameter.ELEM_FAMILY_PARAM).AsValueString(), u"")
-    typ = safe_call(
-        lambda: instance.get_Parameter(
-            BuiltInParameter.ELEM_TYPE_PARAM).AsValueString(), u"")
+        fam = safe_call(lambda: sym.Family.Name, u"") or u""
+        typ = safe_call(lambda: sym.Name, u"") or u""
+
+    if not fam:
+        fam = safe_call(
+            lambda: instance.get_Parameter(
+                BuiltInParameter.ELEM_FAMILY_PARAM).AsValueString(), u"") or u""
+    if not typ:
+        typ = safe_call(
+            lambda: instance.get_Parameter(
+                BuiltInParameter.ELEM_TYPE_PARAM).AsValueString(), u"") or u""
+        if not typ:
+            typ = safe_call(lambda: instance.Name, u"") or u""
     return (fam or u"?", typ or u"?")
 
 

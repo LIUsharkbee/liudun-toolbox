@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
-"""一键布置标高轴网
+"""一键布置标高轴网（单窗口界面）
 
-两种输入方式：
-  1. 参数生成：依次输入标高序列、X/Y 轴距、轴号前缀；
-  2. 从 CSV 导入：一张表同时给标高、轴号、坐标 / 间距。
+全部选项集中在一个窗口里：
 
-两种方式都支持：
-  * 指定轴网起点（局部坐标原点）；
-  * 轴网旋转角度（度，逆时针为正），用于斜轴网。
+  * 输入方式：参数生成 / 从 CSV 导入（切到 CSV 时自动禁用参数区）
+  * 标高序列、X/Y 向轴距、X/Y 轴号前缀
+  * 起点坐标、旋转角度
+  * 是否同时创建楼层平面视图
+  * 实时预览：点「预览」先看要建什么，再点「确定」
 
 CSV 格式（四列，逗号 / 制表符分隔，可带表头）：
 
@@ -33,6 +33,38 @@ import codecs
 import math
 import traceback
 
+import clr
+
+clr.AddReference("PresentationFramework")
+clr.AddReference("PresentationCore")
+clr.AddReference("WindowsBase")
+
+from System.Windows import (
+    CornerRadius,
+    FontWeights,
+    HorizontalAlignment,
+    MessageBox,
+    ResizeMode,
+    TextWrapping,
+    Thickness,
+    VerticalAlignment,
+    Window,
+    WindowStartupLocation,
+)
+from System.Windows.Controls import (
+    Border,
+    Button,
+    CheckBox,
+    ComboBox,
+    ComboBoxItem,
+    Label,
+    Orientation,
+    ScrollBarVisibility,
+    StackPanel,
+    TextBox,
+)
+from System.Windows.Media import Brushes, FontFamily
+
 from Autodesk.Revit.DB import (
     FilteredElementCollector,
     Grid,
@@ -49,6 +81,13 @@ doc = revit.doc
 output = script.get_output()
 
 FT_TO_MM = 304.8
+SHELL_XAML = u"""
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="一键布置标高轴网" Width="580" Height="680"
+        WindowStartupLocation="CenterScreen" ResizeMode="NoResize"
+        ShowInTaskbar="False"/>
+"""
 MARGIN = 1000.0            # 轴网端头外挑，mm
 
 
@@ -184,31 +223,10 @@ def spec_from_csv(path):
     return {"levels": levels, "x": x_lines, "y": y_lines}
 
 
-def spec_from_params(ask):
-    elevations = parse_numbers(ask(
-        default=u"0, 3600, 7200, 10800",
-        prompt=u"标高（mm，逗号分隔，从下往上）：",
-        title=u"一键布置标高轴网 - 标高"))
-    if not elevations:
-        forms.alert(u"没有解析到标高值。")
-        return None
-
-    x_gaps = parse_numbers(ask(
-        default=u"6000, 6000, 6000",
-        prompt=u"X 向轴距（mm；留空则跳过 X 轴）：",
-        title=u"一键布置标高轴网 - X 向"))
-    y_gaps = parse_numbers(ask(
-        default=u"8000, 8000",
-        prompt=u"Y 向轴距（mm；留空则跳过 Y 轴）：",
-        title=u"一键布置标高轴网 - Y 向"))
-
-    prefixes = ask(
-        default=u"1; A",
-        prompt=u"轴号前缀（X;Y，用分号分隔，例如 1;A）：",
-        title=u"一键布置标高轴网 - 轴号") or u"1; A"
-    parts = prefixes.replace(u"，", u";").replace(u",", u";").split(u";")
-    x_prefix = parts[0].strip() if parts else u"1"
-    y_prefix = parts[1].strip() if len(parts) > 1 else u"A"
+def spec_from_params(levels_text, x_gaps_text, y_gaps_text, x_prefix, y_prefix):
+    elevations = parse_numbers(levels_text)
+    x_gaps = parse_numbers(x_gaps_text)
+    y_gaps = parse_numbers(y_gaps_text)
 
     x_lines = []
     coord = 0.0
@@ -249,55 +267,307 @@ def floor_plan_type_id():
     return None
 
 
+def describe_spec(spec, origin, angle, want_views):
+    lines = []
+    levels = spec["levels"]
+    xs = spec["x"]
+    ys = spec["y"]
+    if levels:
+        names = [format_level_name(mm) for _, mm in levels]
+        lines.append(u"标高 {0} 个：{1}".format(len(levels), u"、".join(names)))
+    else:
+        lines.append(u"标高 0 个")
+    if xs:
+        lines.append(u"X 轴 {0} 条：{1}".format(
+            len(xs), u"、".join(n for n, _ in xs)))
+    else:
+        lines.append(u"X 轴 0 条")
+    if ys:
+        lines.append(u"Y 轴 {0} 条：{1}".format(
+            len(ys), u"、".join(n for n, _ in ys)))
+    else:
+        lines.append(u"Y 轴 0 条")
+    lines.append(u"起点 ({0:.0f}, {1:.0f}) mm，旋转 {2:.2f}°".format(
+        origin[0], origin[1], angle))
+    lines.append(u"创建楼层平面：{0}".format(u"是" if want_views else u"否"))
+    return u"\n".join(lines)
+
+
+class SyncWindow(forms.WPFWindow):
+    """单窗口配置界面。"""
+
+    def __init__(self):
+        forms.WPFWindow.__init__(self, SHELL_XAML, literal_string=True)
+        self.result = None
+        self._build()
+
+    # ---------- 界面 ----------
+    def _text_box(self, default, width=300):
+        box = TextBox()
+        box.Width = width
+        box.Height = 26
+        box.Text = default
+        box.VerticalContentAlignment = VerticalAlignment.Center
+        box.Padding = Thickness(4, 2, 4, 2)
+        return box
+
+    def _row(self, label_text, control, label_width=128):
+        panel = StackPanel()
+        panel.Orientation = Orientation.Horizontal
+        panel.Margin = Thickness(0, 0, 0, 8)
+        label = Label()
+        label.Content = label_text
+        label.Width = label_width
+        label.VerticalContentAlignment = VerticalAlignment.Center
+        panel.Children.Add(label)
+        panel.Children.Add(control)
+        return panel
+
+    def _section(self, title, content):
+        border = Border()
+        border.BorderBrush = Brushes.LightGray
+        border.BorderThickness = Thickness(1)
+        border.CornerRadius = CornerRadius(6)
+        border.Padding = Thickness(10, 8, 10, 4)
+        border.Margin = Thickness(0, 0, 0, 10)
+        stack = StackPanel()
+        head = Label()
+        head.Content = title
+        head.FontWeight = FontWeights.SemiBold
+        head.Padding = Thickness(0, 0, 0, 6)
+        stack.Children.Add(head)
+        stack.Children.Add(content)
+        border.Child = stack
+        return border
+
+    def _build(self):
+        self.Title = u"一键布置标高轴网"
+        self.Width = 580
+        self.Height = 680
+        self.WindowStartupLocation = WindowStartupLocation.CenterScreen
+        self.ResizeMode = ResizeMode.NoResize
+        try:
+            self.FontFamily = FontFamily(u"Microsoft YaHei")
+            self.FontSize = 13
+        except Exception:
+            pass
+
+        root = StackPanel()
+        root.Margin = Thickness(14)
+
+        # 输入方式
+        self.mode_combo = ComboBox()
+        self.mode_combo.Width = 300
+        self.mode_combo.Height = 26
+        self.mode_combo.Items.Add(self._combo_item(u"参数生成（标高序列 + 轴距）"))
+        self.mode_combo.Items.Add(self._combo_item(u"从 CSV 导入"))
+        self.mode_combo.SelectedIndex = 0
+        self.mode_combo.SelectionChanged += self._on_mode_changed
+
+        # CSV
+        self.csv_box = self._text_box(u"", 236)
+        self.csv_box.IsEnabled = False
+        self.browse_btn = Button()
+        self.browse_btn.Content = u"浏览…"
+        self.browse_btn.Width = 60
+        self.browse_btn.Height = 26
+        self.browse_btn.Margin = Thickness(4, 0, 0, 0)
+        self.browse_btn.IsEnabled = False
+        self.browse_btn.Click += self._on_browse
+        csv_panel = StackPanel()
+        csv_panel.Orientation = Orientation.Horizontal
+        csv_panel.Children.Add(self.csv_box)
+        csv_panel.Children.Add(self.browse_btn)
+
+        # 参数
+        self.levels_box = self._text_box(u"0, 3600, 7200, 10800")
+        self.x_gaps_box = self._text_box(u"6000, 6000, 6000")
+        self.y_gaps_box = self._text_box(u"8000, 8000")
+        self.x_prefix_box = self._text_box(u"", 80)
+        self.y_prefix_box = self._text_box(u"", 80)
+
+        # 定位
+        self.origin_box = self._text_box(u"0, 0")
+        self.angle_box = self._text_box(u"0")
+
+        # 是否建视图
+        self.view_check = CheckBox()
+        self.view_check.Content = u"同时创建楼层平面视图"
+        self.view_check.IsChecked = False
+        self.view_check.Margin = Thickness(0, 2, 0, 8)
+
+        # 预览
+        self.preview_box = TextBox()
+        self.preview_box.Height = 110
+        self.preview_box.IsReadOnly = True
+        self.preview_box.TextWrapping = TextWrapping.Wrap
+        self.preview_box.VerticalScrollBarVisibility = ScrollBarVisibility.Auto
+        self.preview_box.Background = Brushes.WhiteSmoke
+        self.preview_box.Padding = Thickness(6)
+        self.preview_box.FontFamily = FontFamily(u"Consolas")
+
+        params = StackPanel()
+        params.Children.Add(self._row(u"标高序列 (mm)", self.levels_box))
+        params.Children.Add(self._row(u"X 向轴距 (mm)", self.x_gaps_box))
+        params.Children.Add(self._row(u"Y 向轴距 (mm)", self.y_gaps_box))
+        row_prefix = StackPanel()
+        row_prefix.Orientation = Orientation.Horizontal
+        lbl_x = Label()
+        lbl_x.Content = u"X 轴号前缀"
+        lbl_x.Width = 128
+        row_prefix.Children.Add(lbl_x)
+        row_prefix.Children.Add(self.x_prefix_box)
+        lbl_y = Label()
+        lbl_y.Content = u"Y 轴号前缀"
+        lbl_y.Width = 96
+        lbl_y.Margin = Thickness(12, 0, 0, 0)
+        row_prefix.Children.Add(lbl_y)
+        row_prefix.Children.Add(self.y_prefix_box)
+        params.Children.Add(row_prefix)
+        self.params_panel = params
+
+        locate = StackPanel()
+        locate.Children.Add(self._row(u"起点 X, Y (mm)", self.origin_box))
+        locate.Children.Add(self._row(u"旋转角度 (°)", self.angle_box))
+
+        root.Children.Add(self._section(u"输入方式", self._row(u"来源", self.mode_combo)))
+        root.Children.Add(self._section(u"CSV 文件", csv_panel))
+        root.Children.Add(self._section(u"参数", params))
+        root.Children.Add(self._section(u"定位", locate))
+        root.Children.Add(self.view_check)
+
+        preview_section = self._section(u"预览", self.preview_box)
+        root.Children.Add(preview_section)
+
+        # 按钮
+        buttons = StackPanel()
+        buttons.Orientation = Orientation.Horizontal
+        buttons.HorizontalAlignment = HorizontalAlignment.Right
+        preview_btn = Button()
+        preview_btn.Content = u"预览"
+        preview_btn.Width = 80
+        preview_btn.Height = 28
+        preview_btn.Margin = Thickness(0, 0, 8, 0)
+        preview_btn.Click += self._on_preview
+        ok_btn = Button()
+        ok_btn.Content = u"确定生成"
+        ok_btn.Width = 96
+        ok_btn.Height = 28
+        ok_btn.Margin = Thickness(0, 0, 8, 0)
+        ok_btn.Click += self._on_ok
+        cancel_btn = Button()
+        cancel_btn.Content = u"取消"
+        cancel_btn.Width = 72
+        cancel_btn.Height = 28
+        cancel_btn.Click += self._on_cancel
+        buttons.Children.Add(preview_btn)
+        buttons.Children.Add(ok_btn)
+        buttons.Children.Add(cancel_btn)
+        root.Children.Add(buttons)
+
+        self.Content = root
+        safe_call(self._update_preview)
+
+    def _combo_item(self, text):
+        item = ComboBoxItem()
+        item.Content = text
+        return item
+
+    # ---------- 事件 ----------
+    def _on_mode_changed(self, sender, args):
+        is_csv = self.mode_combo.SelectedIndex == 1
+        self.csv_box.IsEnabled = is_csv
+        self.browse_btn.IsEnabled = is_csv
+        self.params_panel.IsEnabled = not is_csv
+        self._update_preview()
+
+    def _on_browse(self, sender, args):
+        picker = safe_call(lambda: forms.pick_file, None)
+        if picker is None:
+            MessageBox.Show(u"当前 pyRevit 不支持选文件。")
+            return
+        path = picker(file_ext="csv")
+        if path:
+            self.csv_box.Text = path
+            self._update_preview()
+
+    def _collect(self):
+        origin_nums = parse_numbers(self.origin_box.Text) or [0.0, 0.0]
+        angle_nums = parse_numbers(self.angle_box.Text)
+        return {
+            "is_csv": self.mode_combo.SelectedIndex == 1,
+            "csv_path": self.csv_box.Text.strip(),
+            "levels": self.levels_box.Text,
+            "x_gaps": self.x_gaps_box.Text,
+            "y_gaps": self.y_gaps_box.Text,
+            "x_prefix": (self.x_prefix_box.Text or u"").strip(),
+            "y_prefix": (self.y_prefix_box.Text or u"").strip(),
+            "origin": (origin_nums[0],
+                       origin_nums[1] if len(origin_nums) > 1 else 0.0),
+            "angle": angle_nums[0] if angle_nums else 0.0,
+            "want_views": bool(self.view_check.IsChecked),
+        }
+
+    def _make_spec(self, values):
+        if values["is_csv"]:
+            if not values["csv_path"]:
+                return None, u"请先选择 CSV 文件。"
+            spec = spec_from_csv(values["csv_path"])
+            if not spec["levels"] and not spec["x"] and not spec["y"]:
+                return None, u"CSV 里没有解析到有效数据。\n需要四列：类型,名称,坐标mm,间距mm"
+            return spec, None
+        spec = spec_from_params(values["levels"], values["x_gaps"],
+                                values["y_gaps"], values["x_prefix"],
+                                values["y_prefix"])
+        if not spec["levels"]:
+            return None, u"没有解析到标高值，请检查「标高序列」。"
+        return spec, None
+
+    def _update_preview(self):
+        values = self._collect()
+        spec, error = self._make_spec(values)
+        if spec is None:
+            self.preview_box.Text = error
+            return
+        self.preview_box.Text = describe_spec(
+            spec, values["origin"], values["angle"], values["want_views"])
+
+    def _on_preview(self, sender, args):
+        self._update_preview()
+
+    def _on_ok(self, sender, args):
+        values = self._collect()
+        spec, error = self._make_spec(values)
+        if spec is None:
+            MessageBox.Show(error, u"一键布置标高轴网")
+            return
+        values["spec"] = spec
+        self.result = values
+        self.Close()
+
+    def _on_cancel(self, sender, args):
+        self.result = None
+        self.Close()
+
+
+def run_window():
+    window = SyncWindow()
+    window.ShowDialog()
+    return window.result
+
+
 def main():
     if doc is None:
         forms.alert(u"请先打开一个项目。", exitscript=True)
 
-    ask = safe_call(lambda: forms.ask_for_string, None)
-    if ask is None:
-        forms.alert(u"当前 pyRevit 不支持输入框。", exitscript=True)
-
-    mode = forms.CommandSwitchWindow.show(
-        [u"参数生成（标高序列 + 轴距）", u"从 CSV 导入"],
-        message=u"一键布置标高轴网：选择输入方式")
-    if not mode:
+    values = run_window()
+    if not values:
         return
 
-    origin_text = ask(default=u"0, 0",
-                      prompt=u"轴网起点坐标 X,Y（mm）：",
-                      title=u"起点")
-    origin_nums = parse_numbers(origin_text) or [0.0, 0.0]
-    origin = (origin_nums[0],
-              origin_nums[1] if len(origin_nums) > 1 else 0.0)
-
-    angle_text = ask(default=u"0",
-                     prompt=u"轴网旋转角度（度，逆时针为正，0 表示正交）：",
-                     title=u"旋转角度")
-    angle_nums = parse_numbers(angle_text)
-    angle = angle_nums[0] if angle_nums else 0.0
-
-    if mode.startswith(u"从 CSV"):
-        picker = safe_call(lambda: forms.pick_file, None)
-        if picker is None:
-            forms.alert(u"当前 pyRevit 不支持选文件。")
-            return
-        path = picker(file_ext="csv")
-        if not path:
-            return
-        spec = spec_from_csv(path)
-        if not spec["levels"] and not spec["x"] and not spec["y"]:
-            forms.alert(u"CSV 里没有解析到有效数据。\n需要四列：类型,名称,坐标mm,间距mm")
-            return
-    else:
-        spec = spec_from_params(ask)
-        if spec is None:
-            return
-
-    make_views = forms.SelectFromList.show(
-        [u"同时创建楼层平面视图", u"只建标高和轴网"],
-        title=u"要为每个新标高建楼层平面吗？",
-        multiselect=False) or u"只建标高和轴网"
-    want_views = make_views.startswith(u"同时")
+    spec = values["spec"]
+    origin = values["origin"]
+    angle = values["angle"]
+    want_views = values["want_views"]
 
     existing = {}
     for level in safe_call(lambda: list(FilteredElementCollector(doc).OfClass(Level)), []):

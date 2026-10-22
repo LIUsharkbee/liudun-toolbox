@@ -283,7 +283,7 @@ def main():
 
     mode = forms.CommandSwitchWindow.show(
         [u"只检查 / 定位",
-         u"关闭较薄板的房间边界（选中项批量，一次事务）",
+         u"关闭较薄板的房间边界（不改几何，不会消除警告）",
          u"删除较薄的一块（重复板）"],
         message=u"楼板重叠处理：选择要做什么")
     if not mode:

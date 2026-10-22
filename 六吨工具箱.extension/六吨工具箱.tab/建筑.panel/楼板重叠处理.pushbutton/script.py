@@ -308,7 +308,7 @@ def main():
     mode = forms.CommandSwitchWindow.show(
         [u"只检查 / 定位",
          u"自动剪切（薄板嵌入厚板）",
-         u"关闭较薄板的房间边界",
+         u"关闭较薄板的房间边界（不改几何，不会消除警告）",
          u"删除较薄的一块（重复板）",
          u"批量关闭支护 / 土方类板的房间边界"],
         message=u"楼板重叠处理：选择要做什么")
@@ -369,7 +369,7 @@ def main():
             return
 
     side = u"自动"
-    if mode == u"关闭较薄板的房间边界":
+    if mode == u"关闭较薄板的房间边界（不改几何，不会消除警告）":
         side = forms.SelectFromList.show(
             [u"自动（关闭薄板）", u"关闭 A 侧", u"关闭 B 侧"],
             title=u"关闭哪一块的房间边界？", multiselect=False) or u"自动"
@@ -399,7 +399,7 @@ def main():
     for index, a, b, _ in targets:
         if mode == u"自动剪切（薄板嵌入厚板）":
             ok, msg = cut_pair(a, b)
-        elif mode == u"关闭较薄板的房间边界":
+        elif mode == u"关闭较薄板的房间边界（不改几何，不会消除警告）":
             ok, msg = unbound_floor(a, b, side)
         else:
             ok, msg = delete_floor(a, b, unpin=unpin)

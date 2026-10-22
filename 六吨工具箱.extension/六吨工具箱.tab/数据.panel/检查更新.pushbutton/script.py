@@ -39,6 +39,11 @@ BRANCH = "main"
 RAW_VERSION_URLS = [
     "https://raw.githubusercontent.com/{0}/{1}/{2}/version.json".format(
         REPO_OWNER, REPO_NAME, BRANCH),
+    # 镜像：raw 被墙或 502 时兜底
+    "https://cdn.jsdelivr.net/gh/{0}/{1}@{2}/version.json".format(
+        REPO_OWNER, REPO_NAME, BRANCH),
+    "https://gh-proxy.com/https://raw.githubusercontent.com/{0}/{1}/{2}/version.json".format(
+        REPO_OWNER, REPO_NAME, BRANCH),
 ]
 API_VERSION_URL = "https://api.github.com/repos/{0}/{1}/contents/version.json?ref={2}".format(
     REPO_OWNER, REPO_NAME, BRANCH)

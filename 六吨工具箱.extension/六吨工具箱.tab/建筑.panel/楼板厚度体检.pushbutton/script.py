@@ -47,6 +47,13 @@ def bip(name):
     return getattr(BuiltInParameter, name, None)
 
 
+def warning_text(warning):
+    """Revit 2020 里 Description 可能为空，优先用 GetDescriptionText()。"""
+    text = safe_call(lambda w=warning: w.GetDescriptionText(), None)
+    if text:
+        return text
+    return safe_call(lambda w=warning: w.Description, u"") or u""
+
 def desktop_dir():
     def _get():
         path = Environment.GetFolderPath(Environment.SpecialFolder.Desktop)
@@ -93,7 +100,7 @@ def warned_floor_ids():
     """被“厚度可能不太精确”类警告点名的楼板 ID。"""
     ids = set()
     for warning in safe_call(lambda: list(doc.GetWarnings()), []):
-        desc = safe_call(lambda w=warning: w.Description, u"") or u""
+        desc = warning_text(warning)
         if u"厚度" not in desc:
             continue
         if u"不精确" not in desc and u"过度编辑" not in desc and u"过度" not in desc:

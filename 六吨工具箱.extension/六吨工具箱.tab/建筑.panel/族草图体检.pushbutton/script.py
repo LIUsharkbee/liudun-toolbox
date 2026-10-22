@@ -41,6 +41,13 @@ def safe_call(fn, default=None):
         return default
 
 
+def warning_text(warning):
+    """Revit 2020 里 Description 可能为空，优先用 GetDescriptionText()。"""
+    text = safe_call(lambda w=warning: w.GetDescriptionText(), None)
+    if text:
+        return text
+    return safe_call(lambda w=warning: w.Description, u"") or u""
+
 def desktop_dir():
     def _get():
         path = Environment.GetFolderPath(Environment.SpecialFolder.Desktop)
@@ -68,14 +75,14 @@ def sketch_warnings():
     all_descs = []
     matched = []
     for warning in safe_call(lambda: list(doc.GetWarnings()), []):
-        desc = safe_call(lambda w=warning: w.Description, u"") or u""
+        desc = warning_text(warning)
         all_descs.append(desc)
         if u"偏离" in desc and u"轴" in desc:
             matched.append((warning, desc))
 
     if not matched:
         # 放宽：只要提到“偏离”或“草图 + 轴”
-        for warning, desc in [(w, safe_call(lambda w=w: w.Description, u"") or u"")
+        for warning, desc in [(w, warning_text(w))
                               for w in safe_call(lambda: list(doc.GetWarnings()), [])]:
             if u"偏离" in desc or (u"草图" in desc and u"轴" in desc):
                 matched.append((warning, desc))

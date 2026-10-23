@@ -31,7 +31,15 @@ from __future__ import print_function
 
 import codecs
 import math
+import os
+import re
+import tempfile
 import traceback
+
+try:
+    unichr
+except NameError:
+    unichr = chr
 
 import clr
 
@@ -224,6 +232,175 @@ def spec_from_csv(path):
     return {"levels": levels, "x": x_lines, "y": y_lines}
 
 
+LEVEL_RE = re.compile(r"^[+\-\u00b1]?\d{1,3}\.\d{2,3}$")
+AXIS_RE = re.compile(r"^(?:\d+-)?([0-9]{1,2}|[A-Za-z]{1,2})$")
+
+
+def clean_dxf_text(text):
+    """去掉 MTEXT 的格式控制码（\\A1;、{\\fSimSun;…}、\\U+XXXX 等）。"""
+    if not text:
+        return u""
+    out = text
+    out = re.sub(r"\\[A-Za-z][^;]*;", u"", out)
+    out = out.replace(u"{", u"").replace(u"}", u"")
+    out = re.sub(r"\\P", u" ", out)
+    out = re.sub(r"\\U\+([0-9A-Fa-f]{4})",
+                 lambda m: unichr(int(m.group(1), 16)), out)
+    return out.strip()
+
+
+ACCORECONSOLE = r"C:\Program Files\Autodesk\AutoCAD 2020\accoreconsole.exe"
+
+
+def dwg_to_dxf(dwg_path):
+    """用 AutoCAD accoreconsole 把 DWG 转成 DXF（返回 (dxf路径, 错误)）。"""
+    if not os.path.isfile(ACCORECONSOLE):
+        return None, u"未找到 AutoCAD accoreconsole，请先把 DWG 另存为 DXF。"
+    temp_dir = safe_call(lambda: tempfile.mkdtemp(prefix="ld_dxf_"), None)
+    if not temp_dir:
+        return None, u"无法创建临时目录。"
+
+    dxf_path = os.path.join(temp_dir, "converted.dxf")
+    scr_path = os.path.join(temp_dir, "conv.scr")
+    script_text = "_.FILEDIA\r\n0\r\n_.DXFOUT\r\n{0}\r\n16\r\n".format(dxf_path)
+    try:
+        with codecs.open(scr_path, "w", "ascii") as handle:
+            handle.write(script_text)
+    except Exception as ex:
+        return None, u"写脚本失败：{0}".format(ex)
+
+    try:
+        from System.Diagnostics import Process, ProcessStartInfo
+        info = ProcessStartInfo()
+        info.FileName = ACCORECONSOLE
+        info.Arguments = '/i "{0}" /s "{1}"'.format(dwg_path, scr_path)
+        info.UseShellExecute = False
+        info.CreateNoWindow = True
+        info.RedirectStandardOutput = True
+        info.RedirectStandardError = True
+        process = Process.Start(info)
+        process.WaitForExit(180000)
+        if not os.path.isfile(dxf_path):
+            return None, u"转换失败（AutoCAD 未生成 DXF）。"
+        return dxf_path, u""
+    except Exception as ex:
+        return None, u"调用 AutoCAD 失败：{0}".format(ex)
+
+def read_dxf_texts(path):
+    """读 DXF，返回 [(文本, x, y)]（TEXT / MTEXT / ATTRIB）。"""
+    data = None
+    for encoding in ("utf-8-sig", "utf-8", "gbk"):
+        try:
+            with codecs.open(path, "r", encoding) as handle:
+                data = handle.read()
+            break
+        except Exception:
+            continue
+    if not data:
+        return []
+
+    lines = data.splitlines()
+    out = []
+    current = None
+    index = 0
+    total = len(lines)
+    while index + 1 < total:
+        code_text = lines[index].strip()
+        value = lines[index + 1]
+        index += 2
+        try:
+            code = int(code_text)
+        except ValueError:
+            continue
+
+        if code == 0:
+            if current is not None and current.get("text"):
+                out.append((clean_dxf_text(current["text"]),
+                            current.get("x"), current.get("y")))
+            name = value.strip().upper()
+            current = {"name": name} if name in ("TEXT", "MTEXT", "ATTRIB") else None
+        elif current is not None:
+            if code == 1:
+                current["text"] = value
+            elif code == 3:
+                current["text"] = current.get("text", u"") + value
+            elif code == 10:
+                current["x"] = safe_call(lambda v=value: float(v), None)
+            elif code == 20:
+                current["y"] = safe_call(lambda v=value: float(v), None)
+
+    if current is not None and current.get("text"):
+        out.append((clean_dxf_text(current["text"]),
+                    current.get("x"), current.get("y")))
+    return out
+
+
+def spec_from_dxf(path, scale=1.0):
+    """从 DXF 提取轴号与标高，返回 spec 字典。
+
+    轴号判定：优先认“带前缀”的轴号（1-1、1-A），
+    也接受同一坐标出现两次以上的纯数字/字母（轴号图例通常上下/左右各标一次）。
+    """
+    entries = read_dxf_texts(path)
+    levels = []
+    candidates = []   # (kind, coord, name, prefixed)
+
+    for text, x, y in entries:
+        if not text:
+            continue
+
+        if LEVEL_RE.match(text):
+            value = text.replace(u"±", u"").replace(u"+", u"")
+            number = safe_call(lambda v=value: float(v), None)
+            if number is not None:
+                levels.append((None, number * 1000.0))
+            continue
+
+        prefixed = re.match(r"^\d+-([0-9A-Za-z]{1,3})$", text)
+        if prefixed:
+            name = prefixed.group(1)
+            is_prefixed = True
+        else:
+            match = AXIS_RE.match(text)
+            if not match:
+                continue
+            name = match.group(1)
+            is_prefixed = False
+
+        if name.isdigit():
+            if x is not None:
+                candidates.append(("x", int(round(x * scale)), name, is_prefixed))
+        elif y is not None:
+            candidates.append(("y", int(round(y * scale)), name, is_prefixed))
+
+    # 统计每个坐标出现次数
+    counts = {}
+    for kind, coord, name, is_prefixed in candidates:
+        counts[(kind, coord)] = counts.get((kind, coord), 0) + 1
+
+    x_map = {}
+    y_map = {}
+    for kind, coord, name, is_prefixed in candidates:
+        if not is_prefixed and counts[(kind, coord)] < 2:
+            continue
+        target = x_map if kind == "x" else y_map
+        target.setdefault(coord, name)
+
+    xs = sorted(x_map.items(), key=lambda item: item[0])
+    ys = sorted(y_map.items(), key=lambda item: item[0])
+    levels.sort(key=lambda item: item[1])
+
+    # 平移到原点：图纸坐标常是绝对坐标（如 X=-17006），离项目原点太远会看不见
+    offset_x = float(xs[0][0]) if xs else 0.0
+    offset_y = float(ys[0][0]) if ys else 0.0
+
+    return {
+        "levels": levels,
+        "x": [(name, float(coord) - offset_x) for coord, name in xs],
+        "y": [(name, float(coord) - offset_y) for coord, name in ys],
+    }
+
+
 def spec_from_params(levels_text, x_gaps_text, y_gaps_text, x_prefix, y_prefix):
     elevations = parse_numbers(levels_text)
     x_gaps = parse_numbers(x_gaps_text)
@@ -362,6 +539,7 @@ class SyncWindow(forms.WPFWindow):
         self.mode_combo.Height = 26
         self.mode_combo.Items.Add(self._combo_item(u"参数生成（标高序列 + 轴距）"))
         self.mode_combo.Items.Add(self._combo_item(u"从 CSV 导入"))
+        self.mode_combo.Items.Add(self._combo_item(u"从 DXF 图纸导入（自动识别轴号）"))
         self.mode_combo.SelectedIndex = 0
         self.mode_combo.SelectionChanged += self._on_mode_changed
 
@@ -432,7 +610,7 @@ class SyncWindow(forms.WPFWindow):
         locate.Children.Add(self._row(u"旋转角度 (°)", self.angle_box))
 
         root.Children.Add(self._section(u"输入方式", self._row(u"来源", self.mode_combo)))
-        root.Children.Add(self._section(u"CSV 文件", csv_panel))
+        root.Children.Add(self._section(u"CSV / DXF / DWG 文件", csv_panel))
         root.Children.Add(self._section(u"参数", params))
         root.Children.Add(self._section(u"定位", locate))
         root.Children.Add(self.view_check)
@@ -480,10 +658,11 @@ class SyncWindow(forms.WPFWindow):
 
     # ---------- 事件 ----------
     def _on_mode_changed(self, sender, args):
-        is_csv = self.mode_combo.SelectedIndex == 1
-        self.csv_box.IsEnabled = is_csv
-        self.browse_btn.IsEnabled = is_csv
-        self.params_panel.IsEnabled = not is_csv
+        index = self.mode_combo.SelectedIndex
+        need_file = index in (1, 2)
+        self.csv_box.IsEnabled = need_file
+        self.browse_btn.IsEnabled = need_file
+        self.params_panel.IsEnabled = not need_file
         self._update_preview()
 
     def _on_browse(self, sender, args):
@@ -491,7 +670,10 @@ class SyncWindow(forms.WPFWindow):
         if picker is None:
             MessageBox.Show(u"当前 pyRevit 不支持选文件。")
             return
-        path = picker(file_ext="csv")
+        if self.mode_combo.SelectedIndex == 2:
+            path = picker()          # DXF 模式不限扩展名，DWG 也行
+        else:
+            path = picker(file_ext="csv")
         if path:
             self.csv_box.Text = path
             self._update_preview()
@@ -501,6 +683,7 @@ class SyncWindow(forms.WPFWindow):
         angle_nums = parse_numbers(self.angle_box.Text)
         return {
             "is_csv": self.mode_combo.SelectedIndex == 1,
+            "is_dxf": self.mode_combo.SelectedIndex == 2,
             "csv_path": self.csv_box.Text.strip(),
             "levels": self.levels_box.Text,
             "x_gaps": self.x_gaps_box.Text,
@@ -514,6 +697,22 @@ class SyncWindow(forms.WPFWindow):
         }
 
     def _make_spec(self, values):
+        if values.get("is_dxf"):
+            if not values["csv_path"]:
+                return None, u"请先选择 DXF 或 DWG 文件。"
+            path = values["csv_path"]
+            if path.lower().endswith(".dwg"):
+                dxf_path, error = dwg_to_dxf(path)
+                if not dxf_path:
+                    return None, error
+                path = dxf_path
+            spec = spec_from_dxf(path)
+            if not spec["levels"] and not spec["x"] and not spec["y"]:
+                return None, (u"DXF 里没有识别到轴号或标高。\n"
+                              u"需要轴号文字（如 1-1、1-A 或单独的 1 / A）"
+                              u"或标高文字（如 +3.600）。")
+            return spec, None
+
         if values["is_csv"]:
             if not values["csv_path"]:
                 return None, u"请先选择 CSV 文件。"

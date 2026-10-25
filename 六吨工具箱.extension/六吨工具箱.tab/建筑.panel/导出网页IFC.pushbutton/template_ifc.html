@@ -1,0 +1,524 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__TITLE__</title>
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;background:#0f1419;color:#e6edf3;
+    font-family:"Microsoft YaHei","PingFang SC",system-ui,sans-serif}
+  #cv{position:absolute;inset:0;width:100%;height:100%;display:block;touch-action:none}
+  #hud{position:absolute;top:0;left:0;right:0;padding:10px 14px;display:flex;gap:8px;
+    align-items:center;font-size:13px;background:linear-gradient(#0f1419ee,#0f141900);z-index:5;flex-wrap:wrap}
+  #title{font-weight:600}
+  #info{color:#8b98a8;font-size:12px}
+  .sp{flex:1}
+  button,select{background:#1d2733;color:#cfd8e3;border:1px solid #2a3745;border-radius:6px;
+    padding:5px 11px;font-size:12px;cursor:pointer}
+  button:hover,select:hover{background:#24313f}
+  button.on{border-color:#f0a046;color:#f0a046}
+  #clipWrap{display:flex;align-items:center;gap:6px;font-size:12px;color:#8b98a8}
+  #clip{width:110px}
+  #hint{position:absolute;bottom:12px;left:14px;color:#5b6775;font-size:12px;line-height:1.7;z-index:5}
+  #bar{position:absolute;left:0;top:0;height:3px;background:#f0a046;width:0%;z-index:9;transition:width .2s}
+  #err{position:absolute;inset:0;display:none;align-items:center;justify-content:center;
+    color:#e07a5f;font-size:14px;padding:40px;text-align:center;line-height:1.8;z-index:10}
+  #props{position:absolute;right:14px;bottom:14px;width:260px;background:#161d26ee;border:1px solid #2a3745;
+    border-radius:10px;padding:12px;font-size:12px;line-height:1.7;display:none;z-index:6}
+  #props h3{margin:0 0 8px;font-size:13px;color:#f0a046}
+  #props .row{color:#cfd8e3}
+  #props .k{color:#8b98a8}
+  #legend{position:absolute;left:14px;top:52px;background:#161d26cc;border:1px solid #2a3745;
+    border-radius:8px;padding:8px 10px;font-size:11px;line-height:1.8;display:none;z-index:6}
+  #legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:6px}
+</style>
+</head>
+<body>
+<canvas id="cv"></canvas>
+<div id="bar"></div>
+<div id="hud">
+  <span id="title">__TITLE__</span>
+  <span id="info">解析中…</span>
+  <span class="sp"></span>
+  <select id="storey"><option value="">全部楼层</option></select>
+  <button id="colorByType">类型着色</button>
+  <button id="wire">线框</button>
+  <button id="spin">自动旋转</button>
+  <button id="fit">适配</button>
+  <span id="clipWrap">剖切 <input id="clip" type="range" min="0" max="100" value="100"></span>
+</div>
+<div id="legend"></div>
+<div id="props"></div>
+<div id="hint">左键拖动旋转 · 滚轮缩放 · 右键拖动平移 · 单击构件看属性 · 双击适配</div>
+<div id="err"></div>
+
+<script id="three-b64" type="text/plain">__THREE_B64__</script>
+<script id="ifclib-b64" type="text/plain">__IFCLIB_B64__</script>
+<script id="ifcwasm-b64" type="text/plain">__IFCWASM_B64__</script>
+<script id="ifc-b64" type="text/plain">__IFC_B64__</script>
+
+<script type="module">
+const $ = (id) => document.getElementById(id);
+const bar = $('bar');
+
+function b64ToBytes(b64) {
+  const bin = atob(b64.trim());
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes;
+}
+const moduleUrl = (bytes) => URL.createObjectURL(new Blob([bytes], { type: 'text/javascript' }));
+function fail(message) {
+  const el = $('err');
+  el.style.display = 'flex';
+  el.textContent = message;
+  $('info').textContent = '加载失败';
+}
+
+let THREE, IfcAPI;
+try {
+  THREE = await import(moduleUrl(b64ToBytes($('three-b64').textContent)));
+  const ifcModule = await import(moduleUrl(b64ToBytes($('ifclib-b64').textContent)));
+  IfcAPI = ifcModule.IfcAPI;
+} catch (err) {
+  fail('引擎加载失败：' + err.message);
+  throw err;
+}
+
+/* ---------------- 渲染器 ---------------- */
+const canvas = $('cv');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.localClippingEnabled = false;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0f1419);
+const camera = new THREE.PerspectiveCamera(50, 1, 0.1, 1e8);
+
+scene.add(new THREE.HemisphereLight(0xffffff, 0x445566, 1.15));
+const d1 = new THREE.DirectionalLight(0xffffff, 1.6); d1.position.set(1, 2, 1.5); scene.add(d1);
+const d2 = new THREE.DirectionalLight(0xffffff, 0.55); d2.position.set(-1, -1, -1); scene.add(d2);
+
+const grid = new THREE.GridHelper(100, 20, 0x334455, 0x1f2a35);
+grid.visible = false;
+scene.add(grid);
+
+let group = null;
+let wireframe = false, autoSpin = false, colorByType = false;
+const pickables = [];
+const bounds = { size: new THREE.Vector3(1, 1, 1), center: new THREE.Vector3() };
+const clipPlane = new THREE.Plane(new THREE.Vector3(0, 0, -1), 0);
+let clipEnabled = true;
+
+/* 类别配色 */
+const TYPE_COLORS = {
+  IFCWALL: 0x9fb3c8, IFCWALLSTANDARDCASE: 0x9fb3c8, IFCWALLELEMENTEDCASE: 0x9fb3c8,
+  IFCDOOR: 0xd98f4b, IFCWINDOW: 0x5aa9d6,
+  IFCSLAB: 0x6f8f7a, IFCROOF: 0xb0725f,
+  IFCCOLUMN: 0x8d7fb5, IFCBEAM: 0x7fa5b5,
+  IFCSTAIR: 0xc2a35a, IFCSTAIRFLIGHT: 0xc2a35a, IFCRAMP: 0xc2a35a,
+  IFCRAILING: 0x8aa0a8, IFCCURTAINWALL: 0x66b3c4,
+  IFCFOOTING: 0x6b6f73, IFCPILE: 0x6b6f73,
+  IFCFURNISHINGELEMENT: 0xa08b6a, IFCFURNITURE: 0xa08b6a,
+  IFCSPACE: 0x2b3a46, IFCPLATE: 0x8899a6, IFCMEMBER: 0x8899a6,
+  IFCCOVERING: 0x7d8f9c, IFCBUILDINGELEMENTPROXY: 0x8a939b,
+  IFCSITE: 0x4a5b4f, IFCTRANSPORTELEMENT: 0x7a7f85,
+};
+function colorFor(typeName) {
+  if (TYPE_COLORS[typeName] !== undefined) return TYPE_COLORS[typeName];
+  let hash = 0;
+  const s = typeName || 'X';
+  for (let i = 0; i < s.length; i++) hash = (hash * 31 + s.charCodeAt(i)) % 360;
+  return new THREE.Color().setHSL(hash / 360, 0.35, 0.62).getHex();
+}
+
+/* ---------------- IFC ---------------- */
+let api = null, modelID = -1;
+const storeyOf = new Map();     // expressID -> storey name
+const nameOf = new Map();       // expressID -> name
+const typeOf = new Map();       // expressID -> type name
+
+function readLine(id) {
+  try { return api.GetLine(modelID, id); } catch (e) { return null; }
+}
+function lineTypeName(id) {
+  try { return api.GetNameFromTypeCode(api.GetLineType(modelID, id)); } catch (e) { return 'UNKNOWN'; }
+}
+function lineName(id) {
+  const line = readLine(id);
+  if (!line) return '';
+  const n = line.Name;
+  return n && n.value !== undefined ? String(n.value) : '';
+}
+
+function buildStoreyMap() {
+  let relCode = -1, storeyCode = -1;
+  try { relCode = api.GetTypeCodeFromName('IFCRELCONTAINEDINSPATIALSTRUCTURE'); } catch (e) { }
+  try { storeyCode = api.GetTypeCodeFromName('IFCBUILDINGSTOREY'); } catch (e) { }
+  if (relCode < 0 || storeyCode < 0) return [];
+
+  const storeys = [];
+  try {
+    const relIDs = api.GetLineIDsWithType(modelID, relCode);
+    const total = relIDs.size();
+    for (let i = 0; i < total; i++) {
+      const rel = api.GetLine(modelID, relIDs.get(i));
+      if (!rel || !rel.RelatingStructure) continue;
+      const sid = rel.RelatingStructure.value;
+      if (sid === undefined) continue;
+      const sline = readLine(sid);
+      const sname = sline && sline.Name && sline.Name.value !== undefined
+        ? String(sline.Name.value) : ('楼层 ' + sid);
+      if (storeys.indexOf(sname) < 0) storeys.push(sname);
+      const related = rel.RelatedElements;
+      if (!related) continue;
+      for (let k = 0; k < related.length; k++) {
+        const item = related[k];
+        const eid = item && item.value !== undefined ? item.value : item;
+        if (eid !== undefined) storeyOf.set(eid, sname);
+      }
+    }
+  } catch (e) {
+    console.warn('storey map failed', e);
+  }
+  return storeys;
+}
+
+async function buildIfc() {
+  const ifcBytes = b64ToBytes($('ifc-b64').textContent);
+  const wasmBytes = b64ToBytes($('ifcwasm-b64').textContent);
+  const wasmUrl = URL.createObjectURL(new Blob([wasmBytes], { type: 'application/wasm' }));
+
+  api = new IfcAPI();
+  await api.Init(() => wasmUrl, true);
+
+  modelID = api.OpenModel(ifcBytes, { COORDINATE_TO_ORIGIN: true });
+  if (modelID < 0) throw new Error('IFC 打开失败（modelID < 0）');
+
+  const storeys = buildStoreyMap();
+
+  group = new THREE.Group();
+  const matrix = new THREE.Matrix4();
+  const matCache = new Map();
+  let meshCount = 0, triCount = 0;
+
+  function materialFor(hex) {
+    const key = String(hex);
+    let mat = matCache.get(key);
+    if (!mat) {
+      mat = new THREE.MeshStandardMaterial({
+        color: hex, metalness: 0.05, roughness: 0.88, side: THREE.DoubleSide,
+        wireframe: wireframe, clippingPlanes: [clipPlane], clipShadows: false,
+      });
+      matCache.set(key, mat);
+    }
+    return mat;
+  }
+
+  api.StreamAllMeshes(modelID, (flatMesh) => {
+    meshCount += 1;
+    const eid = flatMesh.expressID;
+    const typeName = lineTypeName(eid);
+    const name = lineName(eid);
+    const storey = storeyOf.get(eid) || '';
+    typeOf.set(eid, typeName);
+    nameOf.set(eid, name);
+
+    const geoms = flatMesh.geometries;
+    const total = geoms.size();
+    for (let gi = 0; gi < total; gi++) {
+      const placed = geoms.get(gi);
+      const geom = api.GetGeometry(modelID, placed.geometryExpressID);
+      const raw = api.GetVertexArray(geom.GetVertexData(), geom.GetVertexDataSize());
+      const idx = api.GetIndexArray(geom.GetIndexData(), geom.GetIndexDataSize());
+      if (!raw.length || !idx.length) continue;
+
+      const count = raw.length / 6;
+      const positions = new Float32Array(count * 3);
+      for (let i = 0; i < count; i++) {
+        positions[i * 3] = raw[i * 6];
+        positions[i * 3 + 1] = raw[i * 6 + 1];
+        positions[i * 3 + 2] = raw[i * 6 + 2];
+      }
+
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+      geo.setIndex(new THREE.BufferAttribute(idx, 1));
+      matrix.fromArray(placed.flatTransformation);
+      geo.applyMatrix4(matrix);
+      geo.computeVertexNormals();
+
+      const c = placed.color || { x: 0.7, y: 0.72, z: 0.75 };
+      const ifcHex = new THREE.Color(c.x, c.y, c.z).getHex();
+      const mesh = new THREE.Mesh(geo, materialFor(colorByType ? null : ifcHex));
+      mesh.userData = { eid, typeName, name, storey, ifcHex };
+      mesh.name = typeName;
+      applyMeshStyle(mesh);
+      group.add(mesh);
+      pickables.push(mesh);
+      triCount += idx.length / 3;
+    }
+  });
+
+  scene.add(group);
+
+  const box = new THREE.Box3().setFromObject(group);
+  box.getSize(bounds.size);
+  box.getCenter(bounds.center);
+  group.position.set(-bounds.center.x, -bounds.center.y, -bounds.center.z);
+  bounds.center.set(0, 0, 0);
+
+  $('info').textContent =
+    `构件 ${meshCount.toLocaleString()} · 三角面 ${Math.round(triCount).toLocaleString()} · ` +
+    `尺寸 ${bounds.size.x.toFixed(1)} × ${bounds.size.y.toFixed(1)} × ${bounds.size.z.toFixed(1)}`;
+
+  const select = $('storey');
+  storeys.sort();
+  for (const s of storeys) {
+    const opt = document.createElement('option');
+    opt.value = s;
+    opt.textContent = s;
+    select.appendChild(opt);
+  }
+
+  updateClipRange();
+}
+
+/* ---------------- 着色 / 过滤 / 剖切 ---------------- */
+function materialForColor(hex) {
+  const key = 'c' + hex;
+  if (!group.userData.cache) group.userData.cache = new Map();
+  const cache = group.userData.cache;
+  let mat = cache.get(key);
+  if (!mat) {
+    mat = new THREE.MeshStandardMaterial({
+      color: hex, metalness: 0.05, roughness: 0.88, side: THREE.DoubleSide,
+      wireframe: wireframe, clippingPlanes: [clipPlane],
+    });
+    cache.set(key, mat);
+  }
+  return mat;
+}
+
+function applyMeshStyle(mesh) {
+  const d = mesh.userData;
+  if (!d) return;
+  const hex = colorByType ? colorFor(d.typeName) : d.ifcHex;
+  mesh.material = materialForColor(hex);
+  mesh.material.wireframe = wireframe;
+  const selected = $('storey').value;
+  mesh.visible = !selected || d.storey === selected;
+  if (selected && d.storey === selected && d.typeName === 'IFCSLAB') {
+    // 楼层选中时楼板压暗一点，避免挡住内部
+    mesh.material = materialForColor(0x556070);
+  }
+}
+
+function updateClipRange() {
+  const range = $('clip');
+  range.value = 100;
+  $('hint').style.opacity = 1;
+}
+
+function updateClipping() {
+  const pct = Number($('clip').value);
+  const half = bounds.size.z * 0.52;
+  const z = half - (pct / 100) * bounds.size.z * 1.04;
+  clipPlane.constant = clipEnabled ? z : 1000000;
+  group.traverse((o) => {
+    if (o.isMesh && o.material) o.material.needsUpdate = true;
+  });
+}
+
+/* ---------------- 相机 ---------------- */
+const cam = { target: new THREE.Vector3(), dist: 10, theta: Math.PI * 0.25, phi: Math.PI * 0.32 };
+
+function applyCamera() {
+  const s = Math.sin(cam.phi), c = Math.cos(cam.phi);
+  camera.position.set(
+    cam.target.x + cam.dist * s * Math.sin(cam.theta),
+    cam.target.y + cam.dist * c,
+    cam.target.z + cam.dist * s * Math.cos(cam.theta),
+  );
+  camera.near = Math.max(cam.dist / 2000, 0.01);
+  camera.far = cam.dist * 200;
+  camera.updateProjectionMatrix();
+  camera.lookAt(cam.target);
+  grid.position.set(0, -bounds.size.y / 2, 0);
+}
+
+function fit() {
+  const maxDim = Math.max(bounds.size.x, bounds.size.y, bounds.size.z) || 1;
+  cam.target.set(0, 0, 0);
+  cam.dist = maxDim * 1.8;
+  cam.theta = Math.PI * 0.25;
+  cam.phi = Math.PI * 0.32;
+  applyCamera();
+}
+
+function resize() {
+  const w = canvas.clientWidth || window.innerWidth;
+  const h = canvas.clientHeight || window.innerHeight;
+  renderer.setSize(w, h, true);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+}
+
+/* ---------------- 拾取 ---------------- */
+const raycaster = new THREE.Raycaster();
+const pointer = new THREE.Vector2();
+let downPos = null;
+
+canvas.addEventListener('pointerdown', (e) => { downPos = { x: e.clientX, y: e.clientY }; });
+
+function pick(e) {
+  const rect = canvas.getBoundingClientRect();
+  pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+  pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+  raycaster.setFromCamera(pointer, camera);
+  const visible = pickables.filter((m) => m.visible);
+  const hits = raycaster.intersectObjects(visible, false);
+  if (!hits.length) { $('props').style.display = 'none'; return; }
+  const mesh = hits[0].object;
+  const d = mesh.userData || {};
+  const title = d.typeName || '构件';
+  $('props').innerHTML =
+    `<h3>${title}</h3>` +
+    `<div class="row"><span class="k">名称：</span>${d.name || '（无）'}</div>` +
+    `<div class="row"><span class="k">楼层：</span>${d.storey || '（未归层）'}</div>` +
+    `<div class="row"><span class="k">IFC 类型：</span>${d.typeName || '-'}</div>` +
+    `<div class="row"><span class="k">Express ID：</span>${d.eid}</div>`;
+  $('props').style.display = 'block';
+}
+
+canvas.addEventListener('click', (e) => {
+  if (!downPos) return;
+  const moved = Math.hypot(e.clientX - downPos.x, e.clientY - downPos.y);
+  downPos = null;
+  if (moved < 4) pick(e);
+});
+
+/* ---------------- 交互 ---------------- */
+let dragging = null;
+const pointers = new Map();
+let pinch = null;
+
+canvas.addEventListener('pointerdown', (e) => {
+  canvas.setPointerCapture(e.pointerId);
+  pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  if (pointers.size === 2) {
+    const [a, b] = [...pointers.values()];
+    pinch = { d: Math.hypot(a.x - b.x, a.y - b.y), dist: cam.dist };
+  }
+  dragging = { x: e.clientX, y: e.clientY, pan: e.button === 2 || e.shiftKey };
+});
+
+canvas.addEventListener('pointermove', (e) => {
+  if (!pointers.has(e.pointerId)) return;
+  pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  if (pointers.size === 2 && pinch) {
+    const [a, b] = [...pointers.values()];
+    const d = Math.hypot(a.x - b.x, a.y - b.y);
+    cam.dist = Math.max(pinch.dist * (pinch.d / Math.max(d, 1)), 0.05);
+    applyCamera();
+    return;
+  }
+  if (!dragging) return;
+  const dx = e.clientX - dragging.x, dy = e.clientY - dragging.y;
+  dragging.x = e.clientX; dragging.y = e.clientY;
+  if (dragging.pan) {
+    const scale = cam.dist * 0.0016;
+    const right = new THREE.Vector3().setFromMatrixColumn(camera.matrix, 0);
+    const up = new THREE.Vector3().setFromMatrixColumn(camera.matrix, 1);
+    cam.target.addScaledVector(right, -dx * scale);
+    cam.target.addScaledVector(up, dy * scale);
+  } else {
+    cam.theta -= dx * 0.006;
+    cam.phi = Math.min(Math.max(cam.phi - dy * 0.006, 0.05), Math.PI - 0.05);
+  }
+  applyCamera();
+});
+
+function endPointer(e) {
+  pointers.delete(e.pointerId);
+  if (pointers.size < 2) pinch = null;
+  if (pointers.size === 0) dragging = null;
+}
+canvas.addEventListener('pointerup', endPointer);
+canvas.addEventListener('pointercancel', endPointer);
+canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+
+canvas.addEventListener('wheel', (e) => {
+  e.preventDefault();
+  cam.dist = Math.max(cam.dist * (e.deltaY > 0 ? 1.12 : 1 / 1.12), 0.05);
+  applyCamera();
+}, { passive: false });
+
+canvas.addEventListener('dblclick', fit);
+
+$('fit').addEventListener('click', fit);
+
+$('wire').addEventListener('click', (e) => {
+  wireframe = !wireframe;
+  e.currentTarget.classList.toggle('on', wireframe);
+  pickables.forEach(applyMeshStyle);
+});
+
+$('spin').addEventListener('click', (e) => {
+  autoSpin = !autoSpin;
+  e.currentTarget.classList.toggle('on', autoSpin);
+});
+
+$('colorByType').addEventListener('click', (e) => {
+  colorByType = !colorByType;
+  e.currentTarget.classList.toggle('on', colorByType);
+  pickables.forEach(applyMeshStyle);
+  const legend = $('legend');
+  if (!colorByType) { legend.style.display = 'none'; return; }
+  const counts = new Map();
+  for (const m of pickables) {
+    const t = (m.userData && m.userData.typeName) || 'UNKNOWN';
+    counts.set(t, (counts.get(t) || 0) + 1);
+  }
+  const items = [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12);
+  legend.innerHTML = items.map(([t, n]) => {
+    const hex = colorFor(t).toString(16).padStart(6, '0');
+    return `<div><i style="background:#${hex}"></i>${t} <span style="color:#6b7785">×${n}</span></div>`;
+  }).join('');
+  legend.style.display = 'block';
+});
+
+$('storey').addEventListener('change', () => {
+  pickables.forEach(applyMeshStyle);
+  $('props').style.display = 'none';
+});
+
+$('clip').addEventListener('input', updateClipping);
+
+window.addEventListener('resize', () => { resize(); applyCamera(); });
+
+function loop() {
+  requestAnimationFrame(loop);
+  if (autoSpin) { cam.theta += 0.004; applyCamera(); }
+  renderer.render(scene, camera);
+}
+
+resize();
+
+try {
+  bar.style.width = '30%';
+  await new Promise((r) => setTimeout(r, 30));
+  await buildIfc();
+  bar.style.width = '100%';
+  setTimeout(() => { bar.style.width = '0%'; }, 400);
+  fit();
+  updateClipping();
+} catch (err) {
+  fail('IFC 解析失败：' + err.message);
+  throw err;
+}
+
+loop();
+</script>
+</body>
+</html>

@@ -1,4 +1,4 @@
 title: 检查更新
-tooltip: 六吨工具箱 · 对比本地与 GitHub 上的版本号，只提示新版本和下载地址，不自动下载覆盖（手动安装后需重启 Revit）
+tooltip: 六吨工具箱 · 对比本地与 GitHub 上的版本号，有新版本时下载并覆盖安装（覆盖后需重启 Revit）
 author: 六吨工具箱
 min_revit_version: 2019

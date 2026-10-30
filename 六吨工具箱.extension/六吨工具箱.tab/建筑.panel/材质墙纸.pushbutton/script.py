@@ -24,12 +24,15 @@ clr.AddReference("PresentationCore")
 clr.AddReference("WindowsBase")
 
 from Autodesk.Revit.DB import (
+    AppearanceAssetElement,
     Color,
+    ElementId,
     FilteredElementCollector,
     Material,
     Wall,
     WallType,
 )
+from Autodesk.Revit.DB.Visual import AssetType
 from System import Uri, UriKind
 from System.Windows.Markup import XamlReader
 
@@ -43,6 +46,7 @@ logger = script.get_logger()
 APP_DIR = os.path.join(os.environ.get("APPDATA", ""), "六吨工具箱")
 WALLPAPER_DIR = os.path.join(os.path.expanduser("~"), "Documents", "六吨工具箱", "墙纸")
 material_texture_state = [False]
+material_note = [u""]
 
 IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".bmp")
 
@@ -108,7 +112,284 @@ def find_material_by_name(name):
 
 
 
-TEXTURE_PROP_NAMES = ("unifiedbitmap_Bitmap", "UnifiedBitmapSchema")
+TEXTURE_BASE_PROPS = ("unifiedbitmap_Bitmap", "UnifiedBitmapSchema", "bitmap")
+
+
+def find_texture_base_asset():
+    """从系统外观资源里找一个含位图属性的，返回 (asset, 属性名)。"""
+    assets = safe_call(
+        lambda: list(doc.Application.GetAssets(AssetType.Appearance)), []) or []
+    for asset in assets:
+        for name in TEXTURE_BASE_PROPS:
+            if safe_call(lambda a=asset, n=name: a.FindByName(n), None) is not None:
+                return asset, name
+    return None, None
+
+
+def _bitmap_prop_of(asset):
+    for name in TEXTURE_BASE_PROPS:
+        prop = safe_call(lambda a=asset, n=name: a.FindByName(n), None)
+        if prop is not None:
+            return prop, name
+    return None, None
+
+
+def _set_double(asset, name, value):
+    prop = safe_call(lambda a=asset, n=name: a.FindByName(n), None)
+    if prop is not None:
+        safe_call(lambda p=prop, v=value: setattr(p, "Value", float(v)))
+
+
+def find_project_texture_asset():
+    """项目里已有、且带位图属性的外观资源；优先挑已经有图的。"""
+    fallback = None
+    for element in safe_call(
+            lambda: list(FilteredElementCollector(doc).OfClass(AppearanceAssetElement)), []) or []:
+        asset = safe_call(lambda e=element: e.GetRenderingAsset(), None)
+        if asset is None:
+            continue
+        prop, name = _bitmap_prop_of(asset)
+        if prop is None:
+            continue
+        value = safe_call(lambda p=prop: p.Value, u"") or u""
+        if value.strip():
+            return element, name, True
+        if fallback is None:
+            fallback = (element, name, False)
+    return fallback if fallback else (None, None, False)
+
+
+TEXTURE_CACHE = os.path.join(os.environ.get("LOCALAPPDATA", ""), "liudun-textures")
+
+
+def ensure_color_material(image_path):
+    """只取图片主色做材质，不挂任何贴图资源（规避渲染黑的问题）。"""
+    base = os.path.splitext(os.path.basename(image_path))[0]
+    name = u"纯色-" + base
+
+    material = find_material_by_name(name)
+    if material is None:
+        created = Material.Create(doc, name)
+        material = safe_call(lambda: doc.GetElement(created), None)
+    if material is None:
+        return None
+
+    color = (200, 200, 200)
+    try:
+        from System.Drawing import Bitmap
+        bmp = Bitmap(image_path)
+        try:
+            step_x = max(1, bmp.Width // 16)
+            step_y = max(1, bmp.Height // 16)
+            r = g = b = count = 0
+            for x in range(0, bmp.Width, step_x):
+                for y in range(0, bmp.Height, step_y):
+                    pixel = bmp.GetPixel(x, y)
+                    r += pixel.R
+                    g += pixel.G
+                    b += pixel.B
+                    count += 1
+            if count:
+                color = (r // count, g // count, b // count)
+        finally:
+            bmp.Dispose()
+    except Exception:
+        pass
+
+    safe_call(lambda: setattr(material, "Color", Color(color[0], color[1], color[2])))
+    safe_call(lambda: setattr(material, "UseRenderAppearanceForShading", True))
+
+    # 关键：真实样式看的是外观资源；没有外观就是黑的，所以建一个纯色外观
+    element = build_solid_appearance(color, u"外观-纯色-" + base)
+    if element is not None:
+        safe_call(lambda m=material, e=element: setattr(m, "AppearanceAssetId", e.Id))
+    return material
+
+
+GENERIC_COLOR_PROPS = ("generic_diffuse", "generic_transparency", "generic_glossiness")
+
+
+def find_generic_asset():
+    """找一个带 generic_diffuse 的系统外观资源（纯色用）。"""
+    assets = safe_call(
+        lambda: list(doc.Application.GetAssets(AssetType.Appearance)), []) or []
+    for asset in assets:
+        if safe_call(lambda a=asset: a.FindByName("generic_diffuse"), None) is not None:
+            return asset
+    return None
+
+
+def whiten_asset_colors(asset):
+    """把外观资源里所有颜色类属性刷成白色，避免贴图被乘黑。"""
+    if asset is None:
+        return 0
+    count = safe_call(lambda a=asset: a.Size, 0) or 0
+    changed = 0
+    for index in range(count):
+        prop = safe_call(lambda a=asset, i=index: a.Get(i), None)
+        if prop is None:
+            continue
+        name = safe_call(lambda p=prop: p.Name, u"") or u""
+        lowered = name.lower()
+        if not (u"color" in lowered or u"diffuse" in lowered):
+            continue
+        ok = safe_call(
+            lambda p=prop: p.SetValueAsColor(Color(255, 255, 255)), None)
+        if ok is None:
+            changed += 1
+    return changed
+
+
+def build_solid_appearance(color_rgb, name):
+    """创建纯色外观资源，真实样式下按颜色显示。"""
+    base = find_generic_asset()
+    if base is None:
+        return None
+    element = safe_call(
+        lambda: AppearanceAssetElement.Create(doc, name, base), None)
+    if element is None:
+        element = safe_call(
+            lambda: AppearanceAssetElement.GetAppearanceAssetElementByName(doc, name), None)
+    if element is None:
+        return None
+    rendering = safe_call(lambda e=element: e.GetRenderingAsset(), None)
+    if rendering is None:
+        return element
+    prop = safe_call(lambda r=rendering: r.FindByName("generic_diffuse"), None)
+    if prop is not None:
+        safe_call(lambda p=prop, c=Color(color_rgb[0], color_rgb[1], color_rgb[2]):
+                  p.SetValueAsColor(c))
+    return element
+
+
+def paint_walls(walls, material_id):
+    """用油漆工具直接刷墙面（只刷竖直面），返回 (成功面数, 失败列表)。"""
+    from Autodesk.Revit.DB import Options, PlanarFace
+
+    options = Options()
+    options.ComputeReferences = True
+    painted = 0
+    failed = []
+
+    for wall in walls:
+        faces = 0
+        try:
+            geometry = safe_call(lambda w=wall: w.get_Geometry(options), None)
+            if geometry is None:
+                failed.append(u"取不到几何")
+                continue
+
+            for item in geometry:
+                solid = item
+                face_list = safe_call(lambda s=solid: s.Faces, None)
+                if face_list is None:
+                    continue
+                for face in face_list:
+                    try:
+                        planar = face if isinstance(face, PlanarFace) else None
+                        if planar is None:
+                            continue
+                        normal = safe_call(lambda f=planar: f.FaceNormal, None)
+                        if normal is None:
+                            continue
+                        if abs(safe_call(lambda n=normal: n.Z, 0.0)) > 0.1:
+                            continue      # 跳过顶面/底面，只刷竖直面
+                        doc.Paint(wall.Id, face, material_id)
+                        faces += 1
+                    except Exception:
+                        continue
+            if faces:
+                painted += faces
+            else:
+                failed.append(u"没有可刷的竖直面")
+        except Exception:
+            failed.append(traceback.format_exc().splitlines()[-1])
+    return painted, failed
+
+
+def stage_texture(image_path):
+    """把图片复制到纯英文路径，避免 Revit 渲染器读不了中文路径。"""
+    try:
+        if not os.path.isdir(TEXTURE_CACHE):
+            os.makedirs(TEXTURE_CACHE)
+        ext = os.path.splitext(image_path)[1].lower() or ".png"
+        import hashlib
+        digest = hashlib.md5(image_path.encode("utf-8")).hexdigest()[:12]
+        target = os.path.join(TEXTURE_CACHE, "tex_" + digest + ext)
+        source_size = os.path.getsize(image_path)
+        if (not os.path.isfile(target)) or os.path.getsize(target) != source_size:
+            with open(image_path, "rb") as src:
+                data = src.read()
+            with open(target, "wb") as dst:
+                dst.write(data)
+        return target
+    except Exception:
+        return image_path
+
+
+def build_textured_material(image_path):
+    """创建或复用带图片纹理的材质，返回 (material, 是否写入纹理, 说明)。"""
+    base = os.path.splitext(os.path.basename(image_path))[0]
+    mat_name = u"墙纸-" + base
+    asset_name = u"外观-墙纸-" + base
+
+    material = find_material_by_name(mat_name)
+
+    element, prop_name, had_texture = find_project_texture_asset()
+    created_new = False
+    if element is not None:
+        # 复制项目里已有的外观资源，保留它的全部纹理参数（缩放、映射等）
+        dup = safe_call(lambda e=element, n=asset_name: e.Duplicate(n), None)
+        if dup is None:
+            dup = safe_call(
+                lambda: AppearanceAssetElement.GetAppearanceAssetElementByName(doc, asset_name), None)
+        element = dup
+    else:
+        system_asset, prop_name = find_texture_base_asset()
+        if system_asset is not None:
+            element = safe_call(
+                lambda: AppearanceAssetElement.Create(doc, asset_name, system_asset), None)
+            created_new = True
+
+    if element is None or prop_name is None:
+        return material, False, u"项目里没有可复制的贴图外观资源"
+
+    rendering = safe_call(lambda e=element: e.GetRenderingAsset(), None)
+    if rendering is None:
+        return material, False, u"取不到外观资源"
+
+    prop = safe_call(lambda r=rendering, n=prop_name: r.FindByName(n), None)
+    if prop is None:
+        return material, False, u"外观资源里没有位图属性"
+
+    staged = stage_texture(image_path)
+    safe_call(lambda p=prop, v=staged: setattr(p, "Value", v))
+    written = safe_call(lambda p=prop: p.Value, u"")
+    if not written:
+        return material, False, u"位图属性写入失败（路径或只读）"
+
+    # 关键：新建/复制后的纹理缩放可能是 0，会渲染成纯黑
+    _set_double(rendering, "unifiedbitmap_RealWorldScaleX", 1000.0)
+    _set_double(rendering, "unifiedbitmap_RealWorldScaleY", 1000.0)
+    _set_double(rendering, "unifiedbitmap_RealWorldOffsetX", 0.0)
+    _set_double(rendering, "unifiedbitmap_RealWorldOffsetY", 0.0)
+    _set_double(rendering, "unifiedbitmap_Rotation", 0.0)
+
+    # 位图外观里所有颜色属性刷白，避免贴图被乘黑
+    whiten_asset_colors(rendering)
+
+    if material is None:
+        created = Material.Create(doc, mat_name)
+        material = safe_call(lambda: doc.GetElement(created), None)
+        if material is None:
+            return None, False, u"创建材质失败"
+    safe_call(lambda m=material, e=element: setattr(m, "AppearanceAssetId", e.Id))
+    safe_call(lambda m=material: setattr(m, "Color", Color(255, 255, 255)))
+    safe_call(lambda m=material: setattr(m, "UseRenderAppearanceForShading", True))
+
+    note = u"已写入图片纹理（复制自有贴图的资源）" if had_texture \
+        else (u"已写入图片纹理（新建资源）" if created_new else u"已写入图片纹理")
+    return material, True, note
 
 
 def try_set_texture(material, image_path):
@@ -191,10 +472,16 @@ def ensure_image_material(image_path):
     except Exception:
         pass
 
-    material = Material.Create(doc, name)
-    safe_call(lambda: setattr(material, "Color", Color(color[0], color[1], color[2])))
-    if try_set_texture(material, image_path):
-        material_texture_state[0] = True
+    # 注意：Material.Create 返回的是 ElementId，不是 Material 对象
+    created = Material.Create(doc, name)
+    material = safe_call(lambda: doc.GetElement(created), None)
+    if material is None:
+        material = created  # 兜底：交给调用方判断
+
+    if hasattr(material, "Id"):
+        safe_call(lambda: setattr(material, "Color", Color(color[0], color[1], color[2])))
+        if try_set_texture(material, image_path):
+            material_texture_state[0] = True
     return material
 
 
@@ -204,7 +491,9 @@ def apply_material(walls, material, per_wall_type, exterior_only):
     """把材质写到墙的面层，返回 (成功数, 失败列表)。"""
     ok = 0
     failed = []
-    material_id = material.Id
+    material_id = safe_call(lambda: material.Id, None)
+    if material_id is None:
+        material_id = material      # 已经是 ElementId
     suffix = safe_call(lambda m=material: m.Name, u"材质")
 
     for wall in walls:
@@ -271,7 +560,7 @@ def find_wall_type_by_name(name):
 
 SHELL_XAML = u"""<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-    Title="材质库 / 墙纸" Height="780" Width="1000" WindowStartupLocation="CenterScreen">
+    Title="材质库 / 墙纸" Height="780" Width="1120" WindowStartupLocation="CenterScreen">
   <Grid Margin="10">
     <Grid.RowDefinitions>
       <RowDefinition Height="Auto"/>
@@ -279,18 +568,21 @@ SHELL_XAML = u"""<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/pre
       <RowDefinition Height="Auto"/>
     </Grid.RowDefinitions>
 
-    <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,8">
-      <TextBox x:Name="searchBox" Width="200" Height="26" Margin="0,0,8,0"/>
-      <Button x:Name="btnRefresh" Content="刷新" Height="28" Margin="0,0,10,0" Padding="14,2"/>
-      <CheckBox x:Name="chkExterior" Content="只改外表面层" IsChecked="True" Margin="0,4,12,0"/>
-      <CheckBox x:Name="chkPerWall" Content="每个墙单独类型" IsChecked="True" Margin="0,4,12,0"/>
-      <Button x:Name="btnApply" Content="贴到所选墙" Height="28" Padding="14,2"/>
-    </StackPanel>
+    <WrapPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,8">
+      <TextBox x:Name="searchBox" Width="200" Height="28" Margin="0,0,8,6"/>
+      <Button x:Name="btnRefresh" Content="刷新" Height="28" Margin="0,0,8,6" Padding="14,2"/>
+      <Button x:Name="btnApply" Content="贴到所选墙" Height="28" Margin="0,0,8,6" Padding="14,2"/>
+      <Button x:Name="btnDiag" Content="诊断选中墙" Height="28" Margin="0,0,14,6" Padding="14,2"/>
+      <CheckBox x:Name="chkExterior" Content="只改外表面层" IsChecked="True" Margin="0,6,10,6" VerticalContentAlignment="Center"/>
+      <CheckBox x:Name="chkPerWall" Content="每墙独立类型" IsChecked="False" Margin="0,6,10,6" VerticalContentAlignment="Center"/>
+      <CheckBox x:Name="chkColorOnly" Content="仅用主色" IsChecked="False" Margin="0,6,10,6" VerticalContentAlignment="Center"/>
+      <CheckBox x:Name="chkPaint" Content="按面刷（推荐）" IsChecked="True" Margin="0,6,10,6" VerticalContentAlignment="Center"/>
+    </WrapPanel>
 
     <Grid Grid.Row="1">
       <Grid.ColumnDefinitions>
         <ColumnDefinition Width="*"/>
-        <ColumnDefinition Width="280"/>
+        <ColumnDefinition Width="300"/>
       </Grid.ColumnDefinitions>
 
       <TabControl Grid.Column="0">
@@ -386,6 +678,90 @@ def material_texture_path_by_id(material_id):
     return material_texture_path(material)
 
 
+
+def diagnose_walls(walls):
+    """把墙面材质的真实情况打出来，定位“为什么还是黑”。"""
+    from Autodesk.Revit.DB import Options, PlanarFace
+
+    lines = []
+    options = Options()
+    options.ComputeReferences = True
+
+    for wall in walls[:3]:
+        name = safe_call(lambda w=wall: w.Name, u"?")
+        lines.append(u"■ 墙：{0}（Id {1}）".format(
+            name, safe_call(lambda w=wall: w.Id.IntegerValue, -1)))
+
+        wall_type = safe_call(lambda w=wall: w.WallType, None)
+        type_name = safe_call(lambda t=wall_type: t.Name, u"?")
+        lines.append(u"  类型：{0}".format(type_name))
+
+        structure = safe_call(lambda t=wall_type: t.GetCompoundStructure(), None)
+        layers = safe_call(lambda s=structure: list(s.GetLayers()), []) or []
+        lines.append(u"  结构层数：{0}".format(len(layers)))
+        for index, layer in enumerate(layers):
+            mid = safe_call(lambda l=layer: l.MaterialId, None)
+            material = safe_call(lambda i=mid: doc.GetElement(i), None) if mid else None
+            mname = safe_call(lambda m=material: m.Name, u"(无)") if material else u"(无)"
+            width = safe_call(lambda l=layer: l.Width, 0) or 0
+            lines.append(u"    层{0}：{1} mm · 材质 {2}".format(index + 1, int(width), mname))
+
+        solids = 0
+        painted_faces = 0
+        total_faces = 0
+        materials_on_faces = []
+        geometry = safe_call(lambda w=wall: w.get_Geometry(options), None)
+        if geometry is not None:
+            for item in geometry:
+                faces = safe_call(lambda s=item: s.Faces, None)
+                if faces is None:
+                    continue
+                solids += 1
+                for face in faces:
+                    total_faces += 1
+                    is_painted = safe_call(lambda f=face: doc.IsPainted(wall.Id, f), False)
+                    if is_painted:
+                        painted_faces += 1
+                        mid = safe_call(lambda f=face: doc.GetPaintedMaterial(wall.Id, f), None)
+                        material = safe_call(lambda i=mid: doc.GetElement(i), None) if mid else None
+                        mname = safe_call(lambda m=material: m.Name, u"?") if material else u"?"
+                        materials_on_faces.append(mname)
+        lines.append(u"  几何体：{0} 个实体，{1} 个面（其中 {2} 个已油漆）".format(
+            solids, total_faces, painted_faces))
+        if materials_on_faces:
+            lines.append(u"  油漆材质：{0}".format(u"、".join(sorted(set(materials_on_faces))[:6])))
+
+        appearance = safe_call(lambda w=wall: w.Category, None)
+        lines.append(u"  类别：{0}".format(safe_call(lambda c=appearance: c.Name, u"?")))
+
+        if layers:
+            mid = safe_call(lambda l=layers[0]: l.MaterialId, None)
+            material = safe_call(lambda i=mid: doc.GetElement(i), None) if mid else None
+            if material is not None:
+                asset_id = safe_call(lambda m=material: m.AppearanceAssetId, None)
+                asset_element = safe_call(lambda i=asset_id: doc.GetElement(i), None) if asset_id else None
+                rendering = safe_call(lambda e=asset_element: e.GetRenderingAsset(), None) if asset_element else None
+                lines.append(u"  外观资源：{0}".format(
+                    safe_call(lambda e=asset_element: e.Name, u"(无)")))
+                if rendering is not None:
+                    count = safe_call(lambda a=rendering: a.Size, 0) or 0
+                    for index in range(min(count, 14)):
+                        prop = safe_call(lambda a=rendering, i=index: a.Get(i), None)
+                        if prop is None:
+                            continue
+                        pname = safe_call(lambda p=prop: p.Name, u"?")
+                        ptype = safe_call(lambda p=prop: p.Type, None)
+                        value = safe_call(lambda p=prop: p.Value, u"")
+                        lines.append(u"    {0} = {1}".format(pname, str(value)[:60]))
+                else:
+                    lines.append(u"    （没有外观资源，真实样式会是黑的）")
+        lines.append(u"")
+
+    lines.append(u"提示：如果「已油漆」数量大于 0，说明墙面被油漆覆盖；")
+    lines.append(u"      这时「按面刷」会直接替换油漆，但需要勾选并按面刷模式执行。")
+    return u"\n".join(lines)
+
+
 class MaterialWindow(forms.WPFWindow):
     def __init__(self):
         forms.WPFWindow.__init__(self, SHELL_XAML, literal_string=True)
@@ -398,6 +774,8 @@ class MaterialWindow(forms.WPFWindow):
         self.preview_text = self.FindName("previewText")
         self.chk_exterior = self.FindName("chkExterior")
         self.chk_per_wall = self.FindName("chkPerWall")
+        self.chk_color_only = self.FindName("chkColorOnly")
+        self.chk_paint = self.FindName("chkPaint")
 
         self.materials = []
         self.visible_materials = []
@@ -409,6 +787,7 @@ class MaterialWindow(forms.WPFWindow):
         self.image_list.SelectionChanged += self._on_image_selected
         self.FindName("btnRefresh").Click += self._on_refresh
         self.FindName("btnApply").Click += self._on_apply
+        self.FindName("btnDiag").Click += self._on_diag
 
         self._load()
 
@@ -489,6 +868,15 @@ class MaterialWindow(forms.WPFWindow):
         self._load()
 
     # ---------- 应用 ----------
+    def _on_diag(self, sender, args):
+        walls = selected_walls()
+        if not walls:
+            forms.alert(u"先在模型里选中一面墙。")
+            return
+        text = diagnose_walls(walls)
+        output.print_md(u"### 墙面材质诊断\n```\n{0}\n```".format(text))
+        forms.alert(text[:1200], title=u"诊断结果")
+
     def _on_apply(self, sender, args):
         if not self.choice:
             forms.alert(u"先选一个材质或墙纸。")
@@ -501,7 +889,17 @@ class MaterialWindow(forms.WPFWindow):
         kind, value = self.choice
         per_wall = bool(safe_call(lambda: self.chk_per_wall.IsChecked, True))
         exterior = bool(safe_call(lambda: self.chk_exterior.IsChecked, True))
+        color_only = bool(safe_call(lambda: self.chk_color_only.IsChecked, False))
+        paint_mode = bool(safe_call(lambda: self.chk_paint.IsChecked, True))
 
+        if per_wall:
+            answer = forms.alert(
+                u"「每个墙单独类型」会复制墙类型并换类型，\n"
+                u"有连接/附着的墙可能被 Revit 打断连接（会弹「无法使图元保持连接」）。\n\n"
+                u"建议先取消勾选，只改现有墙类型的面层材质。\n\n仍要继续吗？",
+                title=u"材质库", yes=True, no=True)
+            if answer not in (True, u"Yes", u"yes", u"是"):
+                return
         if not per_wall:
             answer = forms.alert(
                 u"将修改墙类型的结构层材质（影响该类型所有墙）。继续吗？",
@@ -509,17 +907,82 @@ class MaterialWindow(forms.WPFWindow):
             if answer not in (True, u"Yes", u"yes", u"是"):
                 return
 
+        ok = 0
+        failed = []
+        first_error = None
+        material_note[0] = u""
         try:
+            from Autodesk.Revit.DB import SubTransaction
+
             with revit.Transaction(u"贴材质 / 墙纸"):
+                if paint_mode:
+                    if kind == "image":
+                        if color_only:
+                            material = ensure_color_material(value)
+                            material_note[0] = u"仅用主色"
+                        else:
+                            material, textured, note = build_textured_material(value)
+                            material_texture_state[0] = textured
+                            material_note[0] = note
+                            if material is None:
+                                material = ensure_color_material(value)
+                                material_note[0] = u"退回纯色"
+                    else:
+                        material = doc.GetElement(value)
+
+                    if material is None:
+                        forms.alert(u"取不到材质。")
+                        return
+                    material_id = safe_call(lambda: material.Id, None)
+                    if material_id is None:
+                        material_id = material
+                    ok, failed = paint_walls(walls, material_id)
+                    text = u"已刷 {0} 个墙面".format(ok)
+                    if material_note[0]:
+                        text += u"；" + material_note[0]
+                    if failed:
+                        text += u"；失败 {0}".format(len(failed))
+                    self.status.Text = text
+                    return
+
                 if kind == "image":
                     material_texture_state[0] = False
-                    material = ensure_image_material(value)
+                    if color_only:
+                        material = ensure_color_material(value)
+                        material_note[0] = u"仅用主色（不贴纹理）"
+                    else:
+                        material, textured, note = build_textured_material(value)
+                        material_texture_state[0] = textured
+                        material_note[0] = note
+                        if material is None:
+                            material = ensure_color_material(value)
+                            material_note[0] = u"退回纯色（纹理失败）"
                 else:
                     material = doc.GetElement(value)
+
                 if material is None:
                     forms.alert(u"取不到材质。")
                     return
-                ok, failed = apply_material(walls, material, per_wall, exterior)
+
+                for wall in walls:
+                    sub = SubTransaction(doc)
+                    sub.Start()
+                    try:
+                        sub_ok, sub_failed = apply_material(
+                            [wall], material, per_wall, exterior)
+                        if sub_ok:
+                            sub.Commit()
+                            ok += 1
+                        else:
+                            sub.RollBack()
+                            failed.extend(sub_failed)
+                    except Exception:
+                        sub.RollBack()
+                        detail = traceback.format_exc().splitlines()[-1]
+                        if first_error is None:
+                            first_error = detail
+                        failed.append(u"{0}：{1}".format(
+                            safe_call(lambda w=wall: w.Name, u"?"), detail))
         except Exception:
             detail = traceback.format_exc()
             logger.error(detail)
@@ -528,8 +991,9 @@ class MaterialWindow(forms.WPFWindow):
 
         text = u"成功 {0} / {1} 面墙".format(ok, len(walls))
         if kind == "image":
-            text += u"；" + (u"已挂图片纹理" if material_texture_state[0]
-                             else u"仅生成同色材质（纹理需在材质浏览器里换图）")
+            text += u"；" + (material_note[0] if material_note[0]
+                             else (u"已写入图片纹理" if material_texture_state[0]
+                                   else u"仅生成同色材质"))
         if failed:
             text += u"；失败 {0}".format(len(failed))
             output.print_md(u"### 失败明细\n" + u"\n".join(u"- " + f for f in failed[:20]))

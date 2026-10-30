@@ -297,9 +297,11 @@ SHELL_XAML = u"""<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/pre
       <WrapPanel x:Name="wrapPanel" Orientation="Horizontal"/>
     </ScrollViewer>
     <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,8,0,0">
-      <Button x:Name="btnLoad" Content="载入到项目" Height="28" Margin="0,0,6,0" Padding="12,2"/>
+      <Button x:Name="btnLoad" Content="载入所选" Height="28" Margin="0,0,6,0" Padding="12,2"/>
       <Button x:Name="btnOpen" Content="打开编辑" Height="28" Margin="0,0,6,0" Padding="12,2"/>
-      <Button x:Name="btnReveal" Content="打开所在文件夹" Height="28" Padding="12,2"/>
+      <Button x:Name="btnReveal" Content="打开所在文件夹" Height="28" Margin="0,0,6,0" Padding="12,2"/>
+      <Button x:Name="btnAll" Content="全选" Height="28" Margin="0,0,6,0" Padding="12,2"/>
+      <Button x:Name="btnNone" Content="清空选择" Height="28" Padding="12,2"/>
     </StackPanel>
   </Grid>
 </Window>"""
@@ -349,7 +351,7 @@ class FamilyManagerWindow(forms.WPFWindow):
         forms.WPFWindow.__init__(self, SHELL_XAML, literal_string=True)
         self.items = []
         self.cards = {}
-        self.selected = None
+        self.selected = {}          # path -> item（多选）
         self.queue = []
         self.shown = 0
         self.limit = self.PAGE
@@ -367,6 +369,8 @@ class FamilyManagerWindow(forms.WPFWindow):
         self.FindName("btnAdd").Click += self._on_add_lib
         self.FindName("btnRemove").Click += self._on_remove_lib
         self.FindName("btnLoad").Click += self._on_load
+        self.FindName("btnAll").Click += self._on_all
+        self.FindName("btnNone").Click += self._on_none
         self.FindName("btnOpen").Click += self._on_open
         self.FindName("btnReveal").Click += self._on_reveal
         self.FindName("btnMore").Click += self._on_more
@@ -385,6 +389,7 @@ class FamilyManagerWindow(forms.WPFWindow):
             self.status.Text = u"还没有库目录，点「添加库目录...」选一个装 .rfa 的文件夹。"
             return
         self.status.Text = u"正在扫描 {0} 个目录...".format(len(libs))
+        self.selected = {}
         self.items = scan_libraries(libs)
         self.limit = self.PAGE
         self._render()
@@ -397,6 +402,7 @@ class FamilyManagerWindow(forms.WPFWindow):
         self.timer.Stop()
         self.wrap.Children.Clear()
         self.cards = {}
+        self.selected = {}
         self.thumb_ok = self.thumb_none = self.thumb_err = 0
         self.first_error = None
         self.shown = 0
@@ -482,26 +488,63 @@ class FamilyManagerWindow(forms.WPFWindow):
                 self.first_error = traceback.format_exc().splitlines()[-1]
         return card
 
+    def _refresh_selection_status(self):
+        count = len(self.selected)
+        if count == 0:
+            self.status.Text = u"未选择（单击卡片多选，Ctrl+A 全选）"
+        elif count == 1:
+            item = list(self.selected.values())[0]
+            self.status.Text = u"已选 1 个：{0}".format(item["name"])
+        else:
+            self.status.Text = u"已选 {0} 个：{1} …".format(
+                count, list(self.selected.values())[0]["name"])
+
     def _on_card_click(self, sender, args):
-        for card in self.cards.values():
+        item = sender.Tag
+        if item is None:
+            return
+        path = item["path"]
+        if path in self.selected:
+            self.selected.pop(path, None)
+            try:
+                sender.Opacity = 0.62
+            except Exception:
+                pass
+        else:
+            self.selected[path] = item
+            try:
+                sender.Opacity = 1.0
+            except Exception:
+                pass
+        self._refresh_selection_status()
+
+    def _on_all(self, sender, args):
+        self.selected = {}
+        for item in self.queue:
+            self.selected[item["path"]] = item
+            card = self.cards.get(item["path"])
+            if card is not None:
+                try:
+                    card.Opacity = 1.0
+                except Exception:
+                    pass
+        self._refresh_selection_status()
+
+    def _on_none(self, sender, args):
+        for path, card in self.cards.items():
             try:
                 card.Opacity = 0.62
             except Exception:
                 pass
-        try:
-            sender.Opacity = 1.0
-        except Exception:
-            pass
-        self.selected = sender.Tag
-        if self.selected:
-            self.status.Text = u"已选：{0}".format(self.selected["name"])
+        self.selected = {}
+        self._refresh_selection_status()
 
     # ---------- 事件 ----------
     def _on_search(self, sender, args):
         self._render()
 
     def _on_refresh(self, sender, args):
-        self.selected = None
+        self.selected = {}
         self._reload()
 
     def _on_more(self, sender, args):
@@ -529,39 +572,62 @@ class FamilyManagerWindow(forms.WPFWindow):
             forms.alert(u"先在网格里点选一个族，再移除它所在的库目录。")
             return
         libs = load_config()
-        target = self.selected["path"]
+        target = list(self.selected.values())[0]["path"]
         remaining = [p for p in libs if not target.startswith(p)]
         if len(remaining) == len(libs):
             forms.alert(u"没找到该族所属的库目录。")
             return
         save_config(remaining)
-        self.selected = None
+        self.selected = {}
         self._reload()
 
     def _on_load(self, sender, args):
         if not self.selected:
-            forms.alert(u"先点选一个族。")
+            forms.alert(u"先点选一个或多个族（单击卡片即可多选）。")
             return
-        item = self.selected
+        items = list(self.selected.values())
+        if len(items) > 1:
+            answer = forms.alert(
+                u"将载入 {0} 个族到当前项目。\n\n"
+                u"同名族会被跳过。继续吗？".format(len(items)),
+                title=u"批量载入", yes=True, no=True)
+            if answer not in (True, u"Yes", u"yes", u"是"):
+                return
+
+        ok = 0
+        skipped = []
+        failed = []
         try:
             with revit.Transaction(u"载入族"):
-                ok = doc.LoadFamily(item["path"])
-            if ok:
-                self.status.Text = u"已载入：{0}".format(item["name"])
-            else:
-                self.status.Text = u"未载入（可能项目里已有同名族）"
+                for item in items:
+                    try:
+                        if doc.LoadFamily(item["path"]):
+                            ok += 1
+                        else:
+                            skipped.append(item["name"])
+                    except Exception:
+                        failed.append(item["name"])
         except Exception:
             detail = traceback.format_exc()
             logger.error(detail)
             output.print_md(u"```\n{0}\n```".format(detail))
             forms.alert(u"载入失败，详见输出窗口。", title=u"族管理器")
+            return
+
+        text = u"载入成功 {0} 个".format(ok)
+        if skipped:
+            text += u"，跳过 {0}（已存在）".format(len(skipped))
+        if failed:
+            text += u"，失败 {0}".format(len(failed))
+        self.status.Text = text
 
     def _on_open(self, sender, args):
         if not self.selected:
             forms.alert(u"先点选一个族。")
             return
+        item = list(self.selected.values())[0]
         try:
-            uidoc.Application.OpenAndActivateDocument(self.selected["path"])
+            uidoc.Application.OpenAndActivateDocument(item["path"])
         except Exception:
             detail = traceback.format_exc()
             logger.error(detail)
@@ -570,8 +636,9 @@ class FamilyManagerWindow(forms.WPFWindow):
     def _on_reveal(self, sender, args):
         if not self.selected:
             return
+        item = list(self.selected.values())[0]
         try:
-            os.startfile(os.path.dirname(self.selected["path"]))
+            os.startfile(os.path.dirname(item["path"]))
         except Exception:
             pass
 

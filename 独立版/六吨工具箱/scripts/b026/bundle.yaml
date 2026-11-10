@@ -1,4 +1,4 @@
-title: 检查更新
-tooltip: 六吨工具箱 · 对比本地与 GitHub 上的版本号，有新版本时下载并覆盖安装（覆盖后需重启 Revit）
+title: 清理备份文件
+tooltip: 六吨工具箱 · 扫描并批量删除 .0001.rvt / .rfa / .rte 与 .rvt.bak 备份副本，默认移到回收站
 author: 六吨工具箱
 min_revit_version: 2019

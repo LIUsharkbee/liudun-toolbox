@@ -22,8 +22,7 @@
 楼梯|楼梯助手|六吨工具箱 · 按层高/踏步高自动算楼梯，并在平面画出梯段边界线、踏步线、平台线|||scripts/b021/script.py|LiuDun.Commands.Cmd_021|b021
 楼梯|楼梯踏面体检|六吨工具箱 · 逐跑对比实际踏板深度与类型最小踏面、实际踢面与最大踢面，算出需要加长多少（只读）|icons/b022-32.png|icons/b022-16.png|scripts/b022/script.py|LiuDun.Commands.Cmd_022|b022
 系统|AI 建模助手|六吨工具箱 · 聊天式操作 Revit：创建墙/管道/风管，按属性过滤批量改参数。首次使用请在窗口里填写 DeepSeek API Key|icons/b023-32.png|icons/b023-16.png|scripts/b023/script.py|LiuDun.Commands.Cmd_023|b023
-系统|启动我的世界|六吨工具箱 · 从 Revit 一键拉起 PCL2 启动器（路径会记住，找不到时让你选一次）|icons/b024-32.png|icons/b024-16.png|scripts/b024/script.py|LiuDun.Commands.Cmd_024|b024
-系统|性能优化|六吨工具箱 · 诊断卡顿原因，优化当前视图，清理未使用项，按类型批量删视图（带预览与确认）|icons/b025-32.png|icons/b025-16.png|scripts/b025/script.py|LiuDun.Commands.Cmd_025|b025
-系统|检查更新|六吨工具箱 · 对比本地与 GitHub 上的版本号，有新版本时下载并覆盖安装（覆盖后需重启 Revit）|icons/b026-32.png|icons/b026-16.png|scripts/b026/script.py|LiuDun.Commands.Cmd_026|b026
-系统|清理备份文件|六吨工具箱 · 扫描并批量删除 .0001.rvt / .rfa / .rte 与 .rvt.bak 备份副本，默认移到回收站|icons/b027-32.png|icons/b027-16.png|scripts/b027/script.py|LiuDun.Commands.Cmd_027|b027
-通风|流向检查|六吨工具箱 · 检查选中风系统里全部图元的连接件流向 / 流量，标出可疑图元并导出 CSV（只读，不改模型）|icons/b028-32.png|icons/b028-16.png|scripts/b028/script.py|LiuDun.Commands.Cmd_028|b028
+系统|性能优化|六吨工具箱 · 诊断卡顿原因，优化当前视图，清理未使用项，按类型批量删视图（带预览与确认）|icons/b024-32.png|icons/b024-16.png|scripts/b024/script.py|LiuDun.Commands.Cmd_024|b024
+系统|检查更新|六吨工具箱 · 对比本地与 GitHub 上的版本号，有新版本时下载并覆盖安装（覆盖后需重启 Revit）|icons/b025-32.png|icons/b025-16.png|scripts/b025/script.py|LiuDun.Commands.Cmd_025|b025
+系统|清理备份文件|六吨工具箱 · 扫描并批量删除 .0001.rvt / .rfa / .rte 与 .rvt.bak 备份副本，默认移到回收站|icons/b026-32.png|icons/b026-16.png|scripts/b026/script.py|LiuDun.Commands.Cmd_026|b026
+通风|流向检查|六吨工具箱 · 检查选中风系统里全部图元的连接件流向 / 流量，标出可疑图元并导出 CSV（只读，不改模型）|icons/b027-32.png|icons/b027-16.png|scripts/b027/script.py|LiuDun.Commands.Cmd_027|b027

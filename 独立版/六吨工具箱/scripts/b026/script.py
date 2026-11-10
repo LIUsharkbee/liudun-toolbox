@@ -1,51 +1,106 @@
 # -*- coding: utf-8 -*-
-"""检查更新（只检查，不自动下载）
+"""清理 Revit 备份文件
 
-  * 本地版本：扩展根目录的 version.json（{"version": "1.2.0"}）
-  * 远端版本：GitHub 仓库 main 分支的 version.json（多镜像轮询）
+扫描目标文件夹里的 Revit 备份副本并批量删除：
 
-发现新版本时只提示并给出 GitHub 地址，由用户自行下载安装；
-不再自动下载、解压、覆盖，避免网络或文件操作把扩展弄坏。
+  * 项目备份：项目.0001.rvt、项目.0002.rvt …（Revit 保存时按“备份数量”生成）
+  * 族备份：  族.0001.rfa
+  * 样板备份：样板.0001.rte
+  * 旧式备份：项目.rvt.bak
+
+界面用 pyRevit 官方 WPFWindow + XAML：单窗口、多选、默认移到回收站。
+不会碰正在使用的模型文件——只匹配“序号备份”和 .bak。
 """
 
 from __future__ import print_function
 
-import codecs
-import json
+import datetime
 import os
 import re
 import traceback
 
-import clr
+from pyrevit import revit, forms, script
 
-clr.AddReference("System")
-
-from System.Net import SecurityProtocolType, ServicePointManager, WebClient
-
-from pyrevit import forms, script
-
+doc = revit.doc
 output = script.get_output()
 
-REPO_OWNER = "LIUsharkbee"
-REPO_NAME = "liudun-toolbox"
-BRANCH = "main"
+BACKUP_PATTERN = re.compile(
+    r"(\.\d{4,}\.(rvt|rfa|rte|rft))$|(\.(rvt|rfa|rte)\.bak)$",
+    re.IGNORECASE)
 
-REPO_URL = "https://github.com/{0}/{1}".format(REPO_OWNER, REPO_NAME)
-RELEASES_URL = REPO_URL + "/releases"
-ARCHIVE_URL = REPO_URL + "/archive/refs/heads/{0}.zip".format(BRANCH)
+MB = 1024.0 * 1024.0
 
-RAW_URL = "https://raw.githubusercontent.com/{0}/{1}/{2}/version.json".format(
-    REPO_OWNER, REPO_NAME, BRANCH)
+XAML = u"""
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="清理 Revit 备份文件"
+        Width="780" Height="660" MinWidth="640" MinHeight="420"
+        WindowStartupLocation="CenterScreen"
+        ResizeMode="CanResize"
+        ShowInTaskbar="False">
+  <ScrollViewer VerticalScrollBarVisibility="Auto"
+                HorizontalScrollBarVisibility="Disabled">
+    <Grid Margin="14">
+      <Grid.RowDefinitions>
+        <RowDefinition Height="Auto"/>
+        <RowDefinition Height="Auto"/>
+        <RowDefinition Height="Auto"/>
+        <RowDefinition Height="Auto"/>
+        <RowDefinition Height="Auto"/>
+        <RowDefinition Height="Auto"/>
+        <RowDefinition Height="Auto"/>
+      </Grid.RowDefinitions>
 
-# 国内实测：gh-proxy 系可用，raw / jsdelivr 多半不通，所以放后面
-VERSION_URLS = [
-    "https://gh-proxy.com/" + RAW_URL,
-    "https://ghfast.top/" + RAW_URL,
-    "https://ghproxy.net/" + RAW_URL,
-    "https://api.github.com/repos/{0}/{1}/contents/version.json?ref={2}".format(
-        REPO_OWNER, REPO_NAME, BRANCH),
-    RAW_URL,
-]
+      <TextBlock Grid.Row="0" Text="扫描目录" FontWeight="SemiBold" Margin="0,0,0,6"/>
+
+      <Grid Grid.Row="1" Margin="0,0,0,12">
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="*"/>
+          <ColumnDefinition Width="Auto"/>
+          <ColumnDefinition Width="Auto"/>
+        </Grid.ColumnDefinitions>
+        <TextBox x:Name="FolderBox" Grid.Column="0" Height="28"
+                 VerticalContentAlignment="Center" Padding="4,2"/>
+        <Button x:Name="BrowseBtn" Grid.Column="1" Content="浏览…"
+                Width="76" Height="28" Margin="6,0,0,0"/>
+        <Button x:Name="ScanBtn" Grid.Column="2" Content="扫描"
+                Width="76" Height="28" Margin="6,0,0,0"/>
+      </Grid>
+
+      <TextBlock Grid.Row="2" Text="备份文件" FontWeight="SemiBold" Margin="0,0,0,6"/>
+
+      <ListBox x:Name="FileList" Grid.Row="3" Height="320"
+               SelectionMode="Extended"
+               FontFamily="Consolas"
+               ScrollViewer.VerticalScrollBarVisibility="Auto"/>
+
+      <StackPanel Grid.Row="4" Orientation="Horizontal" Margin="0,8,0,0">
+        <Button x:Name="SelectAllBtn" Content="全选" Width="72" Height="28" Margin="0,0,8,0"/>
+        <Button x:Name="ClearBtn" Content="全不选" Width="72" Height="28" Margin="0,0,8,0"/>
+        <Button x:Name="OldBtn" Content="仅选 30 天前的" Width="128" Height="28"/>
+      </StackPanel>
+
+      <CheckBox x:Name="RecycleCheck" Grid.Row="5"
+                Content="删除时移到回收站（取消勾选则永久删除）"
+                IsChecked="True" Margin="0,12,0,10"/>
+
+      <Grid Grid.Row="6">
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="*"/>
+          <ColumnDefinition Width="Auto"/>
+          <ColumnDefinition Width="Auto"/>
+        </Grid.ColumnDefinitions>
+        <TextBlock x:Name="StatusText" Grid.Column="0"
+                   Text="尚未扫描" VerticalAlignment="Center"/>
+        <Button x:Name="DeleteBtn" Grid.Column="1" Content="删除选中"
+                Width="96" Height="30" Margin="8,0,0,0"/>
+        <Button x:Name="CloseBtn" Grid.Column="2" Content="关闭"
+                Width="72" Height="30" Margin="8,0,0,0"/>
+      </Grid>
+    </Grid>
+  </ScrollViewer>
+</Window>
+"""
 
 
 def safe_call(fn, default=None):
@@ -55,163 +110,189 @@ def safe_call(fn, default=None):
         return default
 
 
-def enable_tls12():
-    try:
-        ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12
-    except Exception:
-        pass
+def human_size(size):
+    if size >= MB * 1024:
+        return u"{0:.2f} GB".format(size / (MB * 1024))
+    if size >= MB:
+        return u"{0:.1f} MB".format(size / MB)
+    return u"{0:.0f} KB".format(size / 1024.0)
 
 
-def download_text(url):
-    enable_tls12()
-    client = WebClient()
-    client.Headers["User-Agent"] = "liudun-toolbox-updater"
-    try:
-        data = client.DownloadData(url)
-    finally:
-        safe_call(lambda: client.Dispose())
-    for encoding in ("utf-8-sig", "utf-8", "gbk"):
-        try:
-            return data.decode(encoding)
-        except Exception:
+def scan_backups(folder):
+    """返回 [(path, size, mtime)]，按大小降序。"""
+    found = []
+    if not folder or not os.path.isdir(folder):
+        return found
+    for name in safe_call(lambda: os.listdir(folder), []) or []:
+        if not BACKUP_PATTERN.search(name):
             continue
-    return u""
+        path = os.path.join(folder, name)
+        if not os.path.isfile(path):
+            continue
+        size = safe_call(lambda: os.path.getsize(path), 0) or 0
+        mtime = safe_call(lambda: os.path.getmtime(path), 0) or 0
+        found.append((path, size, mtime))
+    found.sort(key=lambda item: -item[1])
+    return found
 
 
-def extension_root():
-    """script.py 往上三层：pushbutton → panel → tab → extension。"""
-    here = os.path.dirname(os.path.abspath(__file__))
-    for _ in range(3):
-        here = os.path.dirname(here)
-    return here
-
-
-def local_version():
-    path = os.path.join(extension_root(), "version.json")
-    if not os.path.isfile(path):
-        return u"0.0.0"
-    try:
-        with codecs.open(path, "r", "utf-8") as handle:
-            data = json.loads(handle.read())
-        return u"{0}".format(data.get("version", u"0.0.0"))
-    except Exception:
-        return u"0.0.0"
-
-
-def extract_version(text):
-    """从 JSON / 包装文本 / API base64 里抠版本号。"""
-    import base64
-
-    text = text or u""
-    match = re.search(r'"version"\s*:\s*"([^"]+)"', text)
-    if match:
-        return match.group(1).strip()
-    match = re.search(
-        r'version\s*[:=]\s*["\']?([0-9]+\.[0-9]+(?:\.[0-9]+)?)', text)
-    if match:
-        return match.group(1).strip()
-
-    # GitHub API：内容在 base64 里
-    try:
-        data = json.loads(text)
-        content = data.get("content")
-        if content:
-            inner = base64.b64decode(content).decode("utf-8")
-            match = re.search(r'"version"\s*:\s*"([^"]+)"', inner)
-            if match:
-                return match.group(1).strip()
-    except Exception:
-        pass
-    return None
-
-
-def remote_version():
-    errors = []
-    for url in VERSION_URLS:
-        host = url.split("/")[2]
+def delete_file(path, to_recycle=True):
+    """优先移到回收站，失败则永久删除。返回 (ok, method)。"""
+    if to_recycle:
         try:
-            text = download_text(url)
-            if not text or not text.strip():
-                errors.append(u"{0}: 空响应".format(host))
-                continue
-            version = extract_version(text)
-            if version:
-                return version, u""
-            errors.append(u"{0}: 未找到版本号".format(host))
-        except Exception as ex:
-            errors.append(u"{0}: {1}".format(host, ex))
-    return None, u"；".join(errors)
-
-
-def parse_version(text):
-    text = (text or u"").strip()
-    if text[:1] in (u"v", u"V"):
-        text = text[1:]
-    parts = []
-    for chunk in text.replace(u"-", u".").split(u"."):
-        try:
-            parts.append(int(chunk))
-        except ValueError:
-            parts.append(0)
-    while len(parts) < 3:
-        parts.append(0)
-    return tuple(parts[:3])
-
-
-def open_url(url):
+            import clr
+            clr.AddReference("Microsoft.VisualBasic")
+            from Microsoft.VisualBasic.FileIO import (
+                FileSystem,
+                RecycleOption,
+                UIOption,
+            )
+            FileSystem.DeleteFile(path, UIOption.OnlyErrorDialogs,
+                                  RecycleOption.SendToRecycleBin)
+            return True, u"回收站"
+        except Exception:
+            pass
     try:
-        os.startfile(url)
-        return True
-    except Exception:
-        return False
+        os.remove(path)
+        return True, u"永久删除"
+    except Exception as ex:
+        return False, u"{0}".format(ex)
+
+
+def default_folder():
+    path = safe_call(lambda: doc.PathName, u"") if doc is not None else u""
+    if path and os.path.isfile(path):
+        return os.path.dirname(path)
+    return safe_call(lambda: os.path.expanduser(u"~"), u"")
+
+
+def display_text(size, mtime, name):
+    when = datetime.datetime.fromtimestamp(mtime).strftime("%Y-%m-%d")
+    return u"{0:>9}   {1}   {2}".format(human_size(size), when, name)
+
+
+class CleanupWindow(forms.WPFWindow):
+    def __init__(self):
+        forms.WPFWindow.__init__(self, XAML, literal_string=True)
+        self.files = []
+        self.deleted = []
+
+        self.FolderBox.Text = default_folder()
+        self.BrowseBtn.Click += self.on_browse
+        self.ScanBtn.Click += self.on_scan
+        self.SelectAllBtn.Click += self.on_select_all
+        self.ClearBtn.Click += self.on_clear
+        self.OldBtn.Click += self.on_select_old
+        self.DeleteBtn.Click += self.on_delete
+        self.CloseBtn.Click += self.on_close
+
+        safe_call(lambda: self.on_scan(None, None))
+
+    # ---------- 逻辑 ----------
+    def fill(self, entries):
+        self.files = entries
+        self.FileList.Items.Clear()
+        for path, size, mtime in entries:
+            self.FileList.Items.Add(display_text(size, mtime, os.path.basename(path)))
+        total = sum(size for _, size, _ in entries)
+        if entries:
+            self.StatusText.Text = u"{0} 个备份，共 {1}".format(
+                len(entries), human_size(total))
+        else:
+            self.StatusText.Text = u"没有找到备份文件"
+
+    def on_browse(self, sender, args):
+        picker = safe_call(lambda: forms.pick_folder, None)
+        if picker is None:
+            forms.alert(u"当前 pyRevit 不支持选文件夹。")
+            return
+        folder = picker()
+        if folder:
+            self.FolderBox.Text = folder
+            self.on_scan(None, None)
+
+    def on_scan(self, sender, args):
+        folder = (self.FolderBox.Text or u"").strip()
+        if not folder or not os.path.isdir(folder):
+            self.StatusText.Text = u"目录不存在"
+            self.fill([])
+            return
+        self.fill(scan_backups(folder))
+
+    def on_select_all(self, sender, args):
+        self.FileList.SelectAll()
+
+    def on_clear(self, sender, args):
+        self.FileList.UnselectAll()
+
+    def on_select_old(self, sender, args):
+        self.FileList.UnselectAll()
+        limit = datetime.datetime.now() - datetime.timedelta(days=30)
+        for index, (path, size, mtime) in enumerate(self.files):
+            if datetime.datetime.fromtimestamp(mtime) < limit:
+                self.FileList.SelectedItems.Add(self.FileList.Items[index])
+
+    def selected_paths(self):
+        chosen = []
+        for item in list(self.FileList.SelectedItems):
+            text = u"{0}".format(item)
+            for path, size, mtime in self.files:
+                if text.endswith(os.path.basename(path)):
+                    chosen.append((path, size))
+                    break
+        return chosen
+
+    def on_delete(self, sender, args):
+        chosen = self.selected_paths()
+        if not chosen:
+            forms.alert(u"请先在列表里选择要删除的文件。")
+            return
+        total = sum(size for _, size in chosen)
+        to_recycle = bool(self.RecycleCheck.IsChecked)
+        message = u"确定要删除 {0} 个文件、释放 {1} 吗？\n\n{2}".format(
+            len(chosen), human_size(total),
+            u"删除后可在回收站还原。" if to_recycle else u"将永久删除，无法恢复！")
+        answer = forms.alert(message, title=u"确认删除", yes=True, no=True)
+        if answer not in (True, u"Yes", u"yes", u"是"):
+            return
+
+        ok_count = 0
+        freed = 0
+        failed = []
+        methods = set()
+        for path, size in chosen:
+            ok, method = delete_file(path, to_recycle)
+            if ok:
+                ok_count += 1
+                freed += size
+                methods.add(method)
+            else:
+                failed.append(u"{0}：{1}".format(os.path.basename(path), method))
+
+        self.deleted = [p for p, _ in chosen]
+        self.on_scan(None, None)
+        self.StatusText.Text = u"已删除 {0} 个，释放 {1}".format(
+            ok_count, human_size(freed))
+
+        output.print_md(u"## 清理 Revit 备份文件")
+        output.print_md(u"目录：`{0}`".format(self.FolderBox.Text))
+        output.print_md(u"删除 **{0}** 个文件，释放 **{1}**（{2}）".format(
+            ok_count, human_size(freed), u"、".join(methods) or u"-"))
+        if failed:
+            output.print_md(u"失败 {0} 个：\n".format(len(failed)) +
+                            u"\n".join(u"- " + f for f in failed[:10]))
+
+    def on_close(self, sender, args):
+        self.Close()
 
 
 def main():
-    current = local_version()
-    output.print_md(u"## 检查更新")
-    output.print_md(u"当前版本：**v{0}**，安装位置：`{1}`".format(
-        current, extension_root()))
-    output.print_md(u"正在读取远端版本…")
-
-    latest, error = remote_version()
-    if not latest:
-        output.print_md(u"无法获取远端版本：{0}".format(error or u"未知错误"))
-        forms.alert(
-            u"检查更新失败（网络受限）。\n\n可以手动打开仓库查看最新版本：\n{0}".format(
-                REPO_URL),
-            title=u"检查更新")
-        return
-
-    output.print_md(u"远端最新版本：**v{0}**".format(latest))
-
-    if parse_version(latest) <= parse_version(current):
-        output.print_md(u"已是最新版本，无需更新。")
-        forms.alert(u"当前 v{0}，已是最新版本。".format(current),
-                    title=u"检查更新")
-        return
-
-    message = (
-        u"发现新版本 v{0}（当前 v{1}）。\n\n"
-        u"请到 GitHub 下载后手动安装：\n"
-        u"{2}\n\n"
-        u"安装方法：下载源码压缩包 → 解压 → 把 六吨工具箱.extension\n"
-        u"整个文件夹覆盖到：\n"
-        u"%APPDATA%\\pyRevit\\Extensions\\\n"
-        u"然后重启 Revit。\n\n"
-        u"是否现在打开下载页面？").format(latest, current, REPO_URL)
-
-    answer = forms.alert(message, title=u"发现新版本", yes=True, no=True)
-    if answer not in (True, u"Yes", u"yes", u"是"):
-        return
-
-    if open_url(REPO_URL):
-        output.print_md(u"已在浏览器打开：{0}".format(REPO_URL))
-    else:
-        forms.alert(u"无法自动打开浏览器，请手动访问：\n{0}".format(REPO_URL))
+    window = CleanupWindow()
+    window.ShowDialog()
 
 
 try:
     main()
 except Exception:
     output.print_md(u"脚本出错：\n```\n{0}\n```".format(traceback.format_exc()))
-    forms.alert(u"脚本出错，详见输出窗口。", title=u"检查更新")
+    forms.alert(u"脚本出错，详见输出窗口。", title=u"清理 Revit 备份文件")

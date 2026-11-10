@@ -4,11 +4,19 @@
 【推荐】2.0 独立版：不依赖 pyRevit，也不用手动装 Python
 
 1. 解压 liudun-toolbox-2.0.0-standalone.zip；
-2. 完全关闭 Revit 2020；
+2. 完全关闭 Revit 2020（安装脚本会检查，Revit 开着会直接退出）；
 3. 双击「安装独立版.cmd」；
 4. 看到「按钮数量：28」后重新打开 Revit，功能区出现「六吨工具箱」；
-5. 卸载：删除 %APPDATA%\Autodesk\Revit\Addins\2020\六吨工具箱 文件夹，
-   以及同目录的 六吨工具箱.addin。
+5. 卸载：删除下面两个路径即可
+   %APPDATA%\Autodesk\Revit\Addins\2020\LiuDun\
+   %APPDATA%\Autodesk\Revit\Addins\2020\LiuDun.addin
+   （以前装过旧版的话，同目录的 六吨工具箱.addin 会被自动改名成 .disabled）
+
+按钮布局：建筑（平铺）+ 楼板▾、数据（平铺）、楼梯▾（6 个：平台深度检查 /
+栏杆合规体检 / 栏杆路径 / 栏杆高度修复 / 楼梯助手 / 楼梯踏面体检）、
+系统（平铺 + 系统▾）、通风（平铺）。带 ▾ 的是下拉组，点开才展开。
+
+运行日志：%APPDATA%\六吨工具箱\logs\（host.log / startup.log / output.log）
 
 如果同时装了下面的 pyRevit 扩展版，独立版选项卡会自动叫「六吨工具箱·独立版」。
 

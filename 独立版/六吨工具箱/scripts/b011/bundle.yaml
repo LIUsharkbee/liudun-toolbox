@@ -1,0 +1,4 @@
+title: 楼板厚度体检
+tooltip: 六吨工具箱 · 对比类型厚度与实际平均厚度（体积÷面积），列出被形状编辑改过的板，导出 CSV，只读
+author: 六吨工具箱
+min_revit_version: 2019

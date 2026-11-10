@@ -1,0 +1,4 @@
+title: 写入源ID
+tooltip: 六吨工具箱 · 自动建“源ID”共享参数并绑定到模型，把当前 ElementId 批量写进去，绑定链接后可反查原号
+author: 六吨工具箱
+min_revit_version: 2019

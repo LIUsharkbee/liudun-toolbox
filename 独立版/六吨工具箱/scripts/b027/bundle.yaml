@@ -1,0 +1,4 @@
+title: 清理备份文件
+tooltip: 六吨工具箱 · 扫描并批量删除 .0001.rvt / .rfa / .rte 与 .rvt.bak 备份副本，默认移到回收站
+author: 六吨工具箱
+min_revit_version: 2019

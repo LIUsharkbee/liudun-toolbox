@@ -30,12 +30,16 @@ def get_host_app():
 
     pyRevit 5 里 __revit__ 由 C# 执行器注入到 builtins（不是脚本全局），
     所以 globals() 取不到；优先用 revit.HOST_APP.uiapp。
+    独立版（LiuDun）把 HOST_APP 直接设成 UIApplication 本身，没有 .uiapp，
+    这种情况直接用它。
     """
     host = getattr(revit, 'HOST_APP', None)
     if host is not None:
         app = getattr(host, 'uiapp', None)
         if app is not None:
             return app
+        if is_ui_application(host):
+            return host
 
     try:
         return __revit__  # noqa: F821  （builtin，可能直接就是 UIApplication）

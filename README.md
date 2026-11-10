@@ -7,13 +7,13 @@
 | 版本 | 形态 | 需要 pyRevit | 适合 |
 |---|---|---|---|
 | **2.0 独立版** | `.addin` + `LiuDun.dll`（内嵌 IronPython） | 不需要 | 新装、发给同事 |
-| 1.3.8 扩展版 | `.extension` 文件夹 | 需要 | 已有 pyRevit 环境 |
+| 1.3.10 扩展版 | `.extension` 文件夹 | 需要 | 已有 pyRevit 环境 |
 
 ## 六吨工具箱 2.0（独立版）
 
 不需要 pyRevit、不需要装 Python，双击一下就能装。
 
-1. 下载 Releases 里的 `liudun-toolbox-2.0.0-standalone.zip` 并解压；
+1. 下载 Releases 里的 `liudun-toolbox-2.0.2-standalone.zip` 并解压；
 2. **完全关闭 Revit 2020**；
 3. 双击解压出来的 `安装独立版.cmd`；
 4. 窗口显示 `按钮数量：29` 即成功，重新打开 Revit，功能区出现 **六吨工具箱**。
@@ -36,7 +36,7 @@
 
 > 起因：做一个泵站项目时，被一堆“墙重叠 / 楼板重叠 / 栏杆不连续 / 踏面不足”的警告淹没，于是把排查过程做成了按钮。
 
-## 安装（1.3.8 扩展版）
+## 安装（1.3.10 扩展版）
 
 1. 安装 [pyRevit](https://github.com/eirannejad/pyRevit)（2020 需要 4.8+ 或 5.x）；
 2. 把 `六吨工具箱.extension` 整个文件夹放进：

@@ -17,12 +17,7 @@ if (-not (Test-Path $zip)) {
     exit 1
 }
 
-$running = @(Get-Process -Name "Revit" -ErrorAction SilentlyContinue)
-if ($running.Count -gt 0) {
-    Write-Host "检测到 Revit 正在运行，请先完全关闭 Revit 再安装。"
-    if (-not $NoPause) { Read-Host "按回车退出" | Out-Null }
-    exit 2
-}
+# 不靠进程名判断（会误报成“Revit 还在运行”）：直接安装，文件被占用时再提示。
 
 $tmp = Join-Path $env:TEMP ("liudun_" + [Guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $tmp -Force | Out-Null

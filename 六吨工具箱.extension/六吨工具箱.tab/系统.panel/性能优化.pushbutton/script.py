@@ -28,7 +28,9 @@ from Autodesk.Revit.DB import (
     RevitLinkInstance,
     View,
     ViewDetailLevel,
+    ViewPlan,
     ViewSheet,
+    Transaction,
 )
 from System.Windows.Markup import XamlReader
 
@@ -195,6 +197,106 @@ def optimize_view(view, hide_links=False):
     return done
 
 
+def rescue_plan_views():
+    """把所有平面视图统一降到「粗略」并隐藏导入 CAD / 点云，返回改动统计。"""
+    views = safe_call(lambda: list(FilteredElementCollector(doc).OfClass(ViewPlan)), []) or []
+    total = 0
+    changed = 0
+    for view in views:
+        if safe_call(lambda v=view: v.IsTemplate, False):
+            continue
+        total += 1
+        done = optimize_view(view)
+        if done:
+            changed += 1
+    return total, changed
+
+
+def purge_unused():
+    """清理未使用项（族/类型/材质/视图样板等）。Revit 2020 用无参 PurgeUnused()。"""
+    transaction = Transaction(doc, u"清理未使用项")
+    removed = 0
+    try:
+        transaction.Start()
+        ids = doc.PurgeUnused()
+        removed = len(list(ids)) if ids is not None else 0
+        transaction.Commit()
+    except Exception:
+        safe_call(lambda: transaction.RollBack())
+        removed = 0
+    return removed
+
+
+# ---------------------------------------------------------------- 插件管理
+
+ADDIN_DIRS = [
+    os.path.join(os.environ.get("APPDATA", ""), "Autodesk", "Revit", "Addins", "2020"),
+    r"C:\ProgramData\Autodesk\Revit\Addins\2020",
+]
+
+KEEP_IN_MATCH = ("liudun", "六吨", "ths", "斯维尔", "tangent", "sware")
+
+
+def addin_title(path):
+    try:
+        text = open(path, "rb").read().decode("utf-8", "ignore")
+    except Exception:
+        return u"(读不到)"
+    import re as _re
+    for tag in ("Name", "Assembly", "FullClassName"):
+        match = _re.search(r"<" + tag + r">\s*([^<]+)", text, _re.I)
+        if match:
+            value = match.group(1).strip()
+            if tag == "Assembly":
+                value = os.path.basename(value)
+            if tag == "FullClassName":
+                continue
+            return value
+    return os.path.basename(path)
+
+
+def addin_files():
+    items = []
+    for index, folder in enumerate(ADDIN_DIRS):
+        if not os.path.isdir(folder):
+            continue
+        for name in sorted(os.listdir(folder)):
+            lower = name.lower()
+            if lower.endswith(".addin"):
+                enabled = True
+            elif lower.endswith(".addin.disabled"):
+                enabled = False
+            else:
+                continue
+            path = os.path.join(folder, name)
+            items.append({
+                "path": path,
+                "file": name,
+                "folder": folder,
+                "enabled": enabled,
+                "machine": (index == 1),
+                "title": addin_title(path),
+            })
+    items.sort(key=lambda i: (not i["enabled"], i["machine"], i["file"].lower()))
+    return items
+
+
+def set_addin_enabled(item, enable):
+    path = item["path"]
+    lower = path.lower()
+    if enable:
+        if lower.endswith(".addin.disabled"):
+            target = path[:-len(".disabled")]
+            os.rename(path, target)
+            return target
+        return path
+    if lower.endswith(".addin"):
+        target = path + ".disabled"
+        os.rename(path, target)
+        return target
+    return path
+
+
 # ---------------------------------------------------------------- 界面
 
 SHELL_XAML = u"""<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
@@ -215,6 +317,7 @@ SHELL_XAML = u"""<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/pre
           </Grid.RowDefinitions>
           <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,8">
             <Button x:Name="btnDiag" Content="重新诊断" Height="28" Margin="0,0,6,0" Padding="12,2"/>
+            <Button x:Name="btnRescue" Content="一键急救（全部平面视图）" Height="28" Margin="0,0,6,0" Padding="12,2" FontWeight="Bold"/>
             <Button x:Name="btnView" Content="优化当前视图" Height="28" Margin="0,0,6,0" Padding="12,2"/>
             <Button x:Name="btnPurge" Content="清理未使用项" Height="28" Margin="0,0,6,0" Padding="12,2"/>
             <CheckBox x:Name="chkLinks" Content="同时隐藏链接" Margin="10,4,0,0"/>
@@ -254,6 +357,29 @@ SHELL_XAML = u"""<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/pre
           </StackPanel>
         </Grid>
       </TabItem>
+
+      <TabItem Header="插件管理">
+        <Grid Margin="8">
+          <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+          </Grid.RowDefinitions>
+          <TextBlock Grid.Row="0" Margin="0,0,0,8" TextWrapping="Wrap"
+                     Text="勾选 = 下次启动 Revit 时加载；取消勾选 = 不加载（改的是 .addin 文件后缀，不删文件）。改完必须重启 Revit 才生效。"/>
+          <ListBox x:Name="addinList" Grid.Row="1" SelectionMode="Extended"/>
+          <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,8,0,0">
+            <Button x:Name="btnAddinEnable" Content="启用所选" Height="28" Margin="0,0,6,0" Padding="12,2"/>
+            <Button x:Name="btnAddinDisable" Content="停用所选" Height="28" Margin="0,0,6,0" Padding="12,2"/>
+            <Button x:Name="btnAddinAll" Content="全部启用" Height="28" Margin="0,0,6,0" Padding="12,2"/>
+            <Button x:Name="btnAddinMatch" Content="比赛模式（只留六吨+斯维尔）" Height="28" Margin="0,0,6,0" Padding="12,2"/>
+            <Button x:Name="btnAddinRefresh" Content="刷新" Height="28" Padding="12,2"/>
+          </StackPanel>
+          <TextBlock Grid.Row="3" x:Name="addinNote" Margin="0,8,0,0" TextWrapping="Wrap"
+                     Foreground="Gray" Text=""/>
+        </Grid>
+      </TabItem>
     </TabControl>
 
     <TextBlock Grid.Row="1" x:Name="status" Margin="4,8,0,0" Text="就绪"/>
@@ -277,14 +403,114 @@ class OptimizeWindow(forms.WPFWindow):
         self._targets = []
 
         self.FindName("btnDiag").Click += self._on_diag
+        self.FindName("btnRescue").Click += self._on_rescue
         self.FindName("btnView").Click += self._on_view
         self.FindName("btnPurge").Click += self._on_purge
         self.FindName("btnDelete").Click += self._on_delete
         self.type_list.SelectionChanged += self._on_type_selected
         self.chk_sheets.Click += self._on_type_selected
 
+        self.addin_list = self.FindName("addinList")
+        self.addin_note = self.FindName("addinNote")
+        self.FindName("btnAddinEnable").Click += self._on_addin_enable
+        self.FindName("btnAddinDisable").Click += self._on_addin_disable
+        self.FindName("btnAddinAll").Click += self._on_addin_all
+        self.FindName("btnAddinMatch").Click += self._on_addin_match
+        self.FindName("btnAddinRefresh").Click += self._on_addin_refresh
+
         self._on_diag(None, None)
         self._refresh_types()
+        self._refresh_addins()
+
+    # ---------- 插件管理 ----------
+    def _refresh_addins(self):
+        self._addins = addin_files()
+        self.addin_list.Items.Clear()
+        for item in self._addins:
+            mark = u"☑" if item["enabled"] else u"☐"
+            where = u"公共" if item["machine"] else u"用户"
+            self.addin_list.Items.Add(u"{0} {1}  [{2}]  {3}".format(
+                mark, item["title"], where, item["file"]))
+        enabled = len([i for i in self._addins if i["enabled"]])
+        self.addin_note.Text = u"共 {0} 个插件，已启用 {1} 个。勾选状态在下次启动 Revit 时生效。".format(
+            len(self._addins), enabled)
+
+    def _selected_addins(self):
+        picked = []
+        for index in self.addin_list.SelectedIndices:
+            if 0 <= index < len(self._addins):
+                picked.append(self._addins[index])
+        return picked
+
+    def _apply_addin(self, items, enable):
+        done = []
+        skipped = []
+        for item in items:
+            if (not enable) and ("liudun" in item["path"].lower()):
+                skipped.append(item["file"])
+                continue
+            try:
+                set_addin_enabled(item, enable)
+                done.append(item["file"])
+            except Exception as error:
+                skipped.append(u"{0}（{1}）".format(item["file"], error))
+        self._refresh_addins()
+        text = u"已{0} {1} 个，重启 Revit 生效。".format(
+            u"启用" if enable else u"停用", len(done))
+        if skipped:
+            text += u"\n跳过 {0} 个：{1}".format(len(skipped), u"、".join(skipped[:6]))
+        self.addin_note.Text = text
+        self.status.Text = text.split(u"\n")[0]
+
+    def _on_addin_enable(self, sender, args):
+        items = self._selected_addins()
+        if not items:
+            self.addin_note.Text = u"先在列表里选中要启用的插件（可按住 Ctrl 多选）。"
+            return
+        self._apply_addin(items, True)
+
+    def _on_addin_disable(self, sender, args):
+        items = self._selected_addins()
+        if not items:
+            self.addin_note.Text = u"先在列表里选中要停用的插件（可按住 Ctrl 多选）。"
+            return
+        self._apply_addin(items, False)
+
+    def _on_addin_all(self, sender, args):
+        self._apply_addin(list(self._addins), True)
+
+    def _on_addin_match(self, sender, args):
+        answer = forms.alert(
+            u"比赛模式：只保留「六吨工具箱」和「斯维尔/THS」相关插件，"
+            u"其他全部停用（改 .addin 后缀，不删文件）。\n\n继续吗？",
+            title=u"插件管理", yes=True, no=True)
+        if answer not in (True, u"Yes", u"yes", u"是"):
+            return
+        keep, drop = [], []
+        for item in self._addins:
+            text = item["path"].lower()
+            if any(word in text for word in KEEP_IN_MATCH):
+                keep.append(item)
+            else:
+                drop.append(item)
+        for item in keep:
+            try:
+                set_addin_enabled(item, True)
+            except Exception:
+                pass
+        for item in drop:
+            try:
+                set_addin_enabled(item, False)
+            except Exception:
+                pass
+        self._refresh_addins()
+        self.addin_note.Text = u"比赛模式已设置：启用 {0} 个，停用 {1} 个。重启 Revit 生效。".format(
+            len(keep), len(drop))
+        self.status.Text = u"比赛模式已应用，重启 Revit 生效"
+
+    def _on_addin_refresh(self, sender, args):
+        self._refresh_addins()
+        self.status.Text = u"插件列表已刷新"
 
     # ---------- 诊断 ----------
     def _on_diag(self, sender, args):
@@ -306,6 +532,45 @@ class OptimizeWindow(forms.WPFWindow):
         lines.append(u"  · 另存为时勾选压缩，或做一次「核查模型」。")
         self.report.Text = u"\n".join(lines)
         self.status.Text = u"诊断完成"
+
+    # ---------- 一键急救 ----------
+    def _on_rescue(self, sender, args):
+        answer = forms.alert(
+            u"一键急救会做三件事：\n\n"
+            u"1. 把所有平面视图的详细程度改成「粗略」；\n"
+            u"2. 在所有这些视图里隐藏「导入的 CAD」和「点云」；\n"
+            u"3. 清理未使用项（族/类型/材质）。\n\n"
+            u"这些只影响显示，不会改模型几何；视图设置可用 Ctrl+Z 撤销。\n"
+            u"建议先保存一次。\n\n确定继续吗？",
+            title=u"一键急救", yes=True, no=True)
+        if answer not in (True, u"Yes", u"yes", u"是"):
+            return
+
+        total, changed = rescue_plan_views()
+
+        removed = 0
+        try:
+            with revit.Transaction(u"清理未使用项"):
+                result = safe_call(lambda: doc.PurgeUnused(), None)
+                removed = len(list(result)) if result is not None else 0
+        except Exception:
+            logger.error(traceback.format_exc())
+
+        lines = [
+            u"【一键急救完成】",
+            u"",
+            u"平面视图：检查 {0} 个，改动 {1} 个（粗略 + 隐藏 CAD/点云）".format(total, changed),
+            u"未使用项：清理 {0} 个".format(removed),
+            u"",
+            u"接下来手动做这几件（效果更大）：",
+            u"  · 视图控制栏：关阴影、关「显示边缘」、视觉样式改「隐藏线」或「一致的颜色」；",
+            u"  · VV → 填充图案 → 取消「表面填充图案」；",
+            u"  · 管理 → 管理链接：卸载不用的模型；",
+            u"  · 关掉没用的 3D 视图 / 图纸（用「批量删视图」页）；",
+            u"  · 另存为副本并勾选「压缩」。",
+        ]
+        self.report.Text = u"\n".join(lines)
+        self.status.Text = u"急救完成：改 {0} 个视图，清 {1} 项".format(changed, removed)
 
     # ---------- 视图优化 ----------
     def _on_view(self, sender, args):

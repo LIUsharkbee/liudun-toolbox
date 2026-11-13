@@ -51,6 +51,41 @@ def is_ui_application(app):
         return True   # 拿不到类型就按 UIApplication 试
 
 
+def local_dll():
+    """把 DLL 复制到本地临时目录再加载。
+
+    zip / 网络下载的 DLL 带「来自网络」标记（Zone.Identifier），
+    .NET 4 会拒绝加载并报 loadFromRemoteSources；复制一份即可去掉标记。
+    """
+    import tempfile
+    try:
+        data = open(DLL, 'rb').read()
+    except Exception:
+        return DLL
+    folder = os.path.join(tempfile.gettempdir(), 'liudun_agent')
+    try:
+        if not os.path.isdir(folder):
+            os.makedirs(folder)
+    except Exception:
+        pass
+    target = os.path.join(folder, 'RevitAgent2020.dll')
+    try:
+        fresh = open(target, 'rb').read()
+        if fresh == data:
+            return target
+    except Exception:
+        pass
+    try:
+        handle = open(target, 'wb')
+        try:
+            handle.write(data)
+        finally:
+            handle.close()
+        return target
+    except Exception:
+        return DLL
+
+
 def load_agent_host():
     """返回 (AgentHost 类, 错误文本)。"""
     try:
@@ -59,11 +94,12 @@ def load_agent_host():
         return None, (u'当前 pyRevit 引擎没有 .NET 桥（找不到 clr）。\n'
                       u'请在 pyRevit 设置里使用 IronPython 引擎，或给 CPython 安装 pythonnet。')
 
+    dll_path = local_dll()
     try:
         if hasattr(clr, 'AddReferenceToFileAndPath'):
-            clr.AddReferenceToFileAndPath(DLL)
+            clr.AddReferenceToFileAndPath(dll_path)
         else:
-            clr.AddReference(DLL)
+            clr.AddReference(dll_path)
         from RevitAgent.App import AgentHost
         return AgentHost, None
     except Exception:
@@ -113,5 +149,7 @@ def main():
         forms.alert(u'窗口启动失败：\n\n{0}'.format(detail), title=u'AI 建模助手')
 
 
-if __name__ == '__main__':
+try:
     main()
+except Exception:
+    forms.alert(traceback.format_exc()[-800:], title=u'AI 建模助手')

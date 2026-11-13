@@ -16,6 +16,7 @@ from Autodesk.Revit.DB import (
     Transaction, XYZ, Line, SketchPlane, Plane, ElementId, BuiltInParameter,
     FilteredElementCollector, BuiltInCategory, Level, StairsEditScope,
     DirectShape, GeometryCreationUtilities, CurveLoop, GeometryObject,
+    IFailuresPreprocessor, FailureProcessingResult, FailureSeverity,
 )
 from Autodesk.Revit.DB.Architecture import (
     StairsRun, StairsRunJustification, StairsLanding,
@@ -138,8 +139,17 @@ def compute(params):
                          x3 + width / 2.0, y3))
         bounds = (3.0 * width + 2.0 * gap, len1 + landing)
 
-    lines = build_lines(runs, landings, tread, width)
+    # 朝向：折返方向（左/右）+ 起步方向（+Y / -Y）
+    turn = params.get("turn", 0)
+    ascend = params.get("ascend", 0)
+    if form in (2, 3) and turn == 1:
+        runs = [(-x1, y1, -x2, y2, base) for (x1, y1, x2, y2, base) in runs]
+        landings = [(-x2, y1, -x1, y2) for (x1, y1, x2, y2) in landings]
+    if ascend == 1:
+        runs = [(x1, -y1, x2, -y2, base) for (x1, y1, x2, y2, base) in runs]
+        landings = [(x1, -y2, x2, -y1) for (x1, y1, x2, y2) in landings]
 
+    lines = build_lines(runs, landings, tread, width)
     plan = {
         "form": form,
         "total": total,
@@ -240,6 +250,36 @@ def draw_lines(plan, level_z, draw_steps):
     return count
 
 
+def landing_loop(plan, rect, z):
+    """按平面矩形（mm）生成平台轮廓，用于手动画平台。"""
+    x1, y1, x2, y2 = rect
+    pts = [
+        transform(plan, x1, y1, z),
+        transform(plan, x2, y1, z),
+        transform(plan, x2, y2, z),
+        transform(plan, x1, y2, z),
+    ]
+    loop = CurveLoop()
+    for index in range(4):
+        a = pts[index]
+        b = pts[(index + 1) % 4]
+        loop.Append(Line.CreateBound(XYZ(a.X, a.Y, z), XYZ(b.X, b.Y, z)))
+    return loop
+
+
+class QuietPreprocessor(IFailuresPreprocessor):
+    """吞掉楼梯生成过程中的警告，避免弹窗打断。"""
+
+    def PreprocessFailures(self, accessor):
+        try:
+            for message in accessor.GetFailureMessages():
+                if message.GetSeverity() == FailureSeverity.Warning:
+                    accessor.DeleteWarning(message)
+        except Exception:
+            pass
+        return FailureProcessingResult.Continue
+
+
 def make_stairs(plan, base_level, top_level):
     scope = StairsEditScope(doc, u"楼梯助手")
     stairs_id = scope.Start(base_level.Id, top_level.Id)
@@ -255,9 +295,37 @@ def make_stairs(plan, base_level, top_level):
                 doc, stairs_id, Line.CreateBound(start, end),
                 StairsRunJustification.Center)
             run_ids.append(run.Id)
+
+        plan_landings = plan.get("landings") or []
+        counts = plan.get("counts") or []
         for index in range(len(run_ids) - 1):
-            StairsLanding.CreateAutomaticLanding(
-                doc, run_ids[index], run_ids[index + 1])
+            first_run = run_ids[index]
+            second_run = run_ids[index + 1]
+            done = False
+            try:
+                if StairsLanding.CanCreateAutomaticLanding(doc, first_run, second_run):
+                    StairsLanding.CreateAutomaticLanding(doc, first_run, second_run)
+                    done = True
+                    log(u"平台 {0}：自动生成成功".format(index + 1))
+            except Exception:
+                log(u"平台 {0}：自动生成失败，改手动画。{1}".format(
+                    index + 1, traceback.format_exc()))
+
+            if not done and index < len(plan_landings):
+                try:
+                    risers_before = sum(counts[:index + 1])
+                    z = base_level.Elevation + risers_before * plan["riser"] * MM_TO_FT
+                    loop = landing_loop(plan, plan_landings[index], z)
+                    StairsLanding.CreateSketchedLanding(doc, stairs_id, loop, z)
+                    done = True
+                    log(u"平台 {0}：按矩形手动画成功".format(index + 1))
+                except Exception:
+                    log(u"平台 {0}：手动画也失败。{1}".format(
+                        index + 1, traceback.format_exc()))
+
+            if not done:
+                log(u"平台 {0}：两种方式都失败，楼梯可能不完整".format(index + 1))
+
         transaction.Commit()
     except Exception:
         if transaction.HasStarted():
@@ -268,7 +336,7 @@ def make_stairs(plan, base_level, top_level):
             pass
         log(u"make_stairs 失败：{0}".format(traceback.format_exc()))
         raise
-    scope.Commit(transaction)
+    scope.Commit(QuietPreprocessor())
     return stairs_id
 
 
@@ -425,6 +493,18 @@ class StairWindow(forms.WPFWindow):
         self.rotate_box.Text = u"0"
         self.rotate_box.Width = 90
 
+        self.turn_box = ComboBox()
+        self.turn_box.Width = 90
+        self.turn_box.Items.Add(u"左折返")
+        self.turn_box.Items.Add(u"右折返")
+        self.turn_box.SelectedIndex = 0
+
+        self.ascend_box = ComboBox()
+        self.ascend_box.Width = 110
+        self.ascend_box.Items.Add(u"向上（+Y）")
+        self.ascend_box.Items.Add(u"向下（-Y）")
+        self.ascend_box.SelectedIndex = 0
+
         self.origin_text = TextBlock()
         self.origin_text.Text = u"未拾取（默认模型原点 0,0）"
         self.origin_text.Foreground = Brushes.Gray
@@ -497,6 +577,8 @@ class StairWindow(forms.WPFWindow):
                                 label(u"梯井", 70), self.gap_box]))
         panel.Children.Add(row([label(u"旋转角 °", 80), self.rotate_box,
                                 label(u"起点", 40), self.origin_text]))
+        panel.Children.Add(row([label(u"折返方向", 80), self.turn_box,
+                                label(u"起步方向", 70), self.ascend_box]))
         return panel
 
     def _collect(self):
@@ -509,6 +591,8 @@ class StairWindow(forms.WPFWindow):
             "landing": to_float(self.landing_box.Text, 1200.0),
             "gap": to_float(self.gap_box.Text, 100.0),
             "rotate": to_float(self.rotate_box.Text, 0.0),
+            "turn": self.turn_box.SelectedIndex,
+            "ascend": self.ascend_box.SelectedIndex,
             "origin": self.origin if self.origin is not None else XYZ(0, 0, 0),
         }
         index = self.level_box.SelectedIndex

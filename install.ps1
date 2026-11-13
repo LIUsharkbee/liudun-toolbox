@@ -43,6 +43,8 @@ if (Test-Path $target) {
     catch { Write-Host "旧目录删不掉（可能仍被 Revit 占用），请关闭 Revit 后重试。"; if (-not $NoPause) { Read-Host "按回车退出" | Out-Null }; exit 3 }
 }
 Copy-Item -Path $payload -Destination $target -Recurse -Force
+# 去掉「来自网络」标记，否则 .NET 会拒绝加载 dll
+Get-ChildItem -Path $target -Recurse -File | Unblock-File -ErrorAction SilentlyContinue
 Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
 
 $dll = Join-Path $target "LiuDun.dll"

@@ -255,8 +255,19 @@ def main():
         output.print_md(u"\n".join(failures))
 
 
+def _log_error(text):
+    try:
+        f = open(r"C:\Users\cyl\Documents\deepseek-harness\default-workspace\_墙重叠日志.txt", "ab")
+        f.write((text + u"\n\n").encode("utf-8"))
+        f.close()
+    except Exception:
+        pass
+
+
 try:
     main()
 except Exception:
-    output.print_md(u"脚本出错：\n```\n{0}\n```".format(traceback.format_exc()))
-    forms.alert(u"脚本出错，详见输出窗口。", title=u"墙重叠处理")
+    tb = traceback.format_exc()
+    _log_error(tb)
+    output.print_md(u"脚本出错：\n```\n{0}\n```".format(tb))
+    forms.alert(u"脚本出错：\n{0}".format(tb[-600:]), title=u"墙重叠处理")

@@ -227,77 +227,6 @@ def purge_unused():
     return removed
 
 
-# ---------------------------------------------------------------- 插件管理
-
-ADDIN_DIRS = [
-    os.path.join(os.environ.get("APPDATA", ""), "Autodesk", "Revit", "Addins", "2020"),
-    r"C:\ProgramData\Autodesk\Revit\Addins\2020",
-]
-
-KEEP_IN_MATCH = ("liudun", "六吨", "ths", "斯维尔", "tangent", "sware",
-                 "goujianwu", "gjw", "构件坞")
-NEVER_DISABLE = ("liudun", "goujianwu", "gjw", "构件坞")
-
-
-def addin_title(path):
-    try:
-        text = open(path, "rb").read().decode("utf-8", "ignore")
-    except Exception:
-        return u"(读不到)"
-    import re as _re
-    for tag in ("Name", "Assembly", "FullClassName"):
-        match = _re.search(r"<" + tag + r">\s*([^<]+)", text, _re.I)
-        if match:
-            value = match.group(1).strip()
-            if tag == "Assembly":
-                value = os.path.basename(value)
-            if tag == "FullClassName":
-                continue
-            return value
-    return os.path.basename(path)
-
-
-def addin_files():
-    items = []
-    for index, folder in enumerate(ADDIN_DIRS):
-        if not os.path.isdir(folder):
-            continue
-        for name in sorted(os.listdir(folder)):
-            lower = name.lower()
-            if lower.endswith(".addin"):
-                enabled = True
-            elif lower.endswith(".addin.disabled"):
-                enabled = False
-            else:
-                continue
-            path = os.path.join(folder, name)
-            items.append({
-                "path": path,
-                "file": name,
-                "folder": folder,
-                "enabled": enabled,
-                "machine": (index == 1),
-                "title": addin_title(path),
-            })
-    items.sort(key=lambda i: (not i["enabled"], i["machine"], i["file"].lower()))
-    return items
-
-
-def set_addin_enabled(item, enable):
-    path = item["path"]
-    lower = path.lower()
-    if enable:
-        if lower.endswith(".addin.disabled"):
-            target = path[:-len(".disabled")]
-            os.rename(path, target)
-            return target
-        return path
-    if lower.endswith(".addin"):
-        target = path + ".disabled"
-        os.rename(path, target)
-        return target
-    return path
-
 
 # ---------------------------------------------------------------- 界面
 
@@ -360,28 +289,6 @@ SHELL_XAML = u"""<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/pre
         </Grid>
       </TabItem>
 
-      <TabItem Header="插件管理">
-        <Grid Margin="8">
-          <Grid.RowDefinitions>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="*"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-          </Grid.RowDefinitions>
-          <TextBlock Grid.Row="0" Margin="0,0,0,8" TextWrapping="Wrap"
-                     Text="勾选 = 下次启动 Revit 时加载；取消勾选 = 不加载（改的是 .addin 文件后缀，不删文件）。改完必须重启 Revit 才生效。"/>
-          <ListBox x:Name="addinList" Grid.Row="1" SelectionMode="Extended"/>
-          <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,8,0,0">
-            <Button x:Name="btnAddinEnable" Content="启用所选" Height="28" Margin="0,0,6,0" Padding="12,2"/>
-            <Button x:Name="btnAddinDisable" Content="停用所选" Height="28" Margin="0,0,6,0" Padding="12,2"/>
-            <Button x:Name="btnAddinAll" Content="全部启用" Height="28" Margin="0,0,6,0" Padding="12,2"/>
-            <Button x:Name="btnAddinMatch" Content="比赛模式（只留六吨+斯维尔）" Height="28" Margin="0,0,6,0" Padding="12,2"/>
-            <Button x:Name="btnAddinRefresh" Content="刷新" Height="28" Padding="12,2"/>
-          </StackPanel>
-          <TextBlock Grid.Row="3" x:Name="addinNote" Margin="0,8,0,0" TextWrapping="Wrap"
-                     Foreground="Gray" Text=""/>
-        </Grid>
-      </TabItem>
     </TabControl>
 
     <TextBlock Grid.Row="1" x:Name="status" Margin="4,8,0,0" Text="就绪"/>
@@ -412,120 +319,9 @@ class OptimizeWindow(forms.WPFWindow):
         self.type_list.SelectionChanged += self._on_type_selected
         self.chk_sheets.Click += self._on_type_selected
 
-        self.addin_list = self.FindName("addinList")
-        self.addin_note = self.FindName("addinNote")
-        self.FindName("btnAddinEnable").Click += self._on_addin_enable
-        self.FindName("btnAddinDisable").Click += self._on_addin_disable
-        self.FindName("btnAddinAll").Click += self._on_addin_all
-        self.FindName("btnAddinMatch").Click += self._on_addin_match
-        self.FindName("btnAddinRefresh").Click += self._on_addin_refresh
 
         self._on_diag(None, None)
         self._refresh_types()
-        self._refresh_addins()
-
-    # ---------- 插件管理 ----------
-    def _refresh_addins(self):
-        self._addins = addin_files()
-        self.addin_list.Items.Clear()
-        for item in self._addins:
-            mark = u"☑" if item["enabled"] else u"☐"
-            where = u"公共" if item["machine"] else u"用户"
-            self.addin_list.Items.Add(u"{0} {1}  [{2}]  {3}".format(
-                mark, item["title"], where, item["file"]))
-        enabled = len([i for i in self._addins if i["enabled"]])
-        self.addin_note.Text = u"共 {0} 个插件，已启用 {1} 个。勾选状态在下次启动 Revit 时生效。".format(
-            len(self._addins), enabled)
-
-    def _selected_addins(self):
-        picked = []
-        for index in self.addin_list.SelectedIndices:
-            if 0 <= index < len(self._addins):
-                picked.append(self._addins[index])
-        return picked
-
-    def _confirm_switch(self):
-        answer = forms.alert(
-            u"插件开关只是改文件后缀，不会立刻加载或卸载。\n\n"
-            u"注意：Revit 正在运行时改名，个别插件（例如构件坞）可能直接让 Revit 崩溃。\n"
-            u"正确做法：先保存文件 → 切换 → 立刻重启 Revit。\n\n继续吗？",
-            title=u"插件管理", yes=True, no=True)
-        return answer in (True, u"Yes", u"yes", u"是")
-
-    def _apply_addin(self, items, enable):
-        if not self._confirm_switch():
-            return False
-        done = []
-        skipped = []
-        for item in items:
-            if (not enable) and any(word in item["path"].lower()
-                                   for word in NEVER_DISABLE):
-                skipped.append(item["file"])
-                continue
-            try:
-                set_addin_enabled(item, enable)
-                done.append(item["file"])
-            except Exception as error:
-                skipped.append(u"{0}（{1}）".format(item["file"], error))
-        self._refresh_addins()
-        text = u"已{0} {1} 个，重启 Revit 生效。".format(
-            u"启用" if enable else u"停用", len(done))
-        if skipped:
-            text += u"\n跳过 {0} 个：{1}".format(len(skipped), u"、".join(skipped[:6]))
-        self.addin_note.Text = text
-        self.status.Text = text.split(u"\n")[0]
-
-    def _on_addin_enable(self, sender, args):
-        items = self._selected_addins()
-        if not items:
-            self.addin_note.Text = u"先在列表里选中要启用的插件（可按住 Ctrl 多选）。"
-            return
-        self._apply_addin(items, True)
-
-    def _on_addin_disable(self, sender, args):
-        items = self._selected_addins()
-        if not items:
-            self.addin_note.Text = u"先在列表里选中要停用的插件（可按住 Ctrl 多选）。"
-            return
-        self._apply_addin(items, False)
-
-    def _on_addin_all(self, sender, args):
-        self._apply_addin(list(self._addins), True)
-
-    def _on_addin_match(self, sender, args):
-        answer = forms.alert(
-            u"比赛模式：只保留「六吨工具箱」和「斯维尔/THS」相关插件，"
-            u"其他全部停用（改 .addin 后缀，不删文件）。\n\n继续吗？",
-            title=u"插件管理", yes=True, no=True)
-        if answer not in (True, u"Yes", u"yes", u"是"):
-            return
-        if not self._confirm_switch():
-            return
-        keep, drop = [], []
-        for item in self._addins:
-            text = item["path"].lower()
-            if any(word in text for word in KEEP_IN_MATCH):
-                keep.append(item)
-            else:
-                drop.append(item)
-        for item in keep:
-            try:
-                set_addin_enabled(item, True)
-            except Exception:
-                pass
-        for item in drop:
-            try:
-                set_addin_enabled(item, False)
-            except Exception:
-                pass
-        self._refresh_addins()
-        self.addin_note.Text = u"比赛模式已设置：启用 {0} 个，停用 {1} 个。重启 Revit 生效。".format(
-            len(keep), len(drop))
-        self.status.Text = u"比赛模式已应用，重启 Revit 生效"
-
-    def _on_addin_refresh(self, sender, args):
-        self._refresh_addins()
-        self.status.Text = u"插件列表已刷新"
 
     # ---------- 诊断 ----------
     def _on_diag(self, sender, args):

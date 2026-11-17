@@ -63,11 +63,14 @@ def elem_names(elem):
     return category, type_name
 
 
-def scan():
-    groups = list(FilteredElementCollector(doc).OfClass(Group))
+def scan(groups=None, stats=None):
+    if groups is None:
+        groups = list(FilteredElementCollector(doc).OfClass(Group))
     results = []
     for group in groups:
         members = as_list(safe_call(lambda g=group: g.GetMemberIds(), []))
+        if stats is not None:
+            stats["members"] = stats.get("members", 0) + len(members)
         buckets = {}
         for eid in members:
             elem = safe_call(lambda eid=eid: doc.GetElement(eid), None)
@@ -97,14 +100,44 @@ def scan():
     return results
 
 
+def write_log(text):
+    try:
+        path = r"C:\Users\cyl\Documents\deepseek-harness\default-workspace\_组内重复日志.txt"
+        f = open(path, "ab")
+        try:
+            f.write((u"%s\n" % text).encode("utf-8"))
+        finally:
+            f.close()
+    except Exception:
+        pass
+
+
 def main():
     if doc is None:
         forms.alert(u"请先打开一个项目。", exitscript=True)
 
-    data = scan()
+    write_log(u"== 开始扫描 ==")
+    groups = list(FilteredElementCollector(doc).OfClass(Group))
+    write_log(u"组数量 = %d" % len(groups))
+    if not groups:
+        forms.alert(u"项目里没有「组」。\n\n这个工具只清理组内同位置重复的图元；\n"
+                    u"不在组里的重复图元它不会碰。", title=u"组内重复图元清理")
+        return
+
+    stats = {"members": 0}
+    try:
+        data = scan(groups, stats)
+    except Exception:
+        text = traceback.format_exc()
+        write_log(text)
+        forms.alert(u"扫描失败：\n{0}".format(text.splitlines()[-1]),
+                    title=u"组内重复图元清理")
+        return
+
+    write_log(u"组数 %d，成员 %d，重复位置 %d" % (len(groups), stats.get("members", 0), len(data)))
     if not data:
-        output.print_md(u"## 组内重复图元")
-        output.print_md(u"没有发现组内同位置重复的图元。")
+        forms.alert(u"扫描了 {0} 个组、{1} 个成员，\n没有发现同位置重复的图元。".format(
+            len(groups), stats.get("members", 0)), title=u"组内重复图元清理")
         return
 
     total_dup = sum(x["count"] - 1 for x in data)
@@ -127,6 +160,7 @@ def main():
         rows[:200], title=u"重复清单（同一组内 类别+类型+位置 相同）",
         columns=[u"组 ID", u"组名", u"类别", u"类型", u"实例数", u"位置 (mm)"])
 
+    write_log(u"准备询问是否删除，重复位置 %d" % len(data))
     choice = forms.SelectFromList.show(
         [u"删除重复，每组只留一个（Ctrl+Z 可撤销）", u"只看看，不动"],
         title=u"要清理这些重复吗？", multiselect=False)

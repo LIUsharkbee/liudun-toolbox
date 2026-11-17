@@ -21,9 +21,11 @@ from Autodesk.Revit.DB import (
     FilteredElementCollector,
     FloorType,
     Level,
+    Line,
     SpatialElementBoundaryOptions,
     Transaction,
     Transform,
+    UV,
     ViewDetailLevel,
     XYZ,
 )
@@ -390,6 +392,139 @@ def create_floor(room, floor_type, level, thickness_mm, failures, created):
 
 # ---------------------------------------------------------------- 主流程
 
+def rect_points(p1, p2, z):
+    """两个对角点 -> 矩形四角（逆时针）。"""
+    x1, x2 = sorted([p1.X, p2.X])
+    y1, y2 = sorted([p1.Y, p2.Y])
+    return [XYZ(x1, y1, z), XYZ(x2, y1, z), XYZ(x2, y2, z), XYZ(x1, y2, z)]
+
+
+def curve_array_from_points(points, z):
+    """点列 -> 闭合 CurveArray（自动降到标高平面）。"""
+    array = CurveArray()
+    total = len(points)
+    for index in range(total):
+        start = points[index]
+        end = points[(index + 1) % total]
+        if start.DistanceTo(end) < 1e-6:
+            continue
+        array.Append(Line.CreateBound(XYZ(start.X, start.Y, z), XYZ(end.X, end.Y, z)))
+    return array
+
+
+def create_floor_from_array(array, floor_type, level, thickness_mm, label,
+                            failures, created):
+    """用现成的闭合轮廓建楼板。"""
+    use_type = floor_type
+    if thickness_mm > 0:
+        use_type = ensure_floor_type(floor_type, thickness_mm)
+    try:
+        floor = doc.Create.NewFloor(array, use_type, level, False)
+    except Exception as error:
+        failures.append(u"{0}：{1}".format(label, error))
+        return None
+    try:
+        param = floor.get_Parameter(BuiltInParameter.ALL_MODEL_MARK)
+        if param is not None and not param.IsReadOnly:
+            param.Set(label)
+    except Exception:
+        pass
+    try:
+        param = floor.get_Parameter(BuiltInParameter.FLOOR_HEIGHTABOVELEVEL_PARAM)
+        if param is not None and not param.IsReadOnly:
+            param.Set(0.0)
+    except Exception:
+        pass
+    created.append(floor.Id)
+    return floor
+
+
+def region_loop_at(level, point):
+    """在点周围临时放一个房间，取回闭合边界轮廓（离开事务前必须删房间）。
+
+    返回 (curve_array, failures)。
+    """
+    failures = []
+    room = None
+    shape = None
+    try:
+        room = doc.Create.NewRoom(level, UV(point.X, point.Y))
+    except Exception as error:
+        return None, [u"这个点周围没有闭合区域：{0}".format(error)]
+    try:
+        loops = room_loops(room, level.Elevation)
+        if loops:
+            shape = loops[0]
+    except Exception as error:
+        failures.append(u"取房间边界失败：{0}".format(error))
+    finally:
+        if room is not None:
+            try:
+                doc.Delete(room.Id)
+            except Exception:
+                pass
+    if shape is None:
+        failures.append(u"这个点周围没有围成闭合边界：检查四周墙是否都勾了「房间边界」，"
+                        u"或者有没有断开的缺口")
+    return shape, failures
+
+
+def generate_click_region(point, level, floor_type, thickness, label):
+    """点闭合区域：一个点 -> 一块楼板。"""
+    failures = []
+    created = []
+    transaction = Transaction(doc, u"楼板布置：点闭合区域")
+    transaction.Start()
+    try:
+        shape, shape_failures = region_loop_at(level, point)
+        failures.extend(shape_failures)
+        if shape is not None:
+            create_floor_from_array(shape, floor_type, level, thickness,
+                                    label, failures, created)
+        if created:
+            transaction.Commit()
+        else:
+            transaction.RollBack()
+    except Exception:
+        try:
+            transaction.RollBack()
+        except Exception:
+            pass
+        failures.append(u"整体失败：{0}".format(traceback.format_exc()))
+    return created, failures
+
+
+def generate_rect_region(p1, p2, level, floor_type, thickness):
+    """框选区域：两个对角点 -> 一块矩形楼板。"""
+    failures = []
+    created = []
+    points = rect_points(p1, p2, level.Elevation)
+    width = points[1].X - points[0].X
+    depth = points[2].Y - points[0].Y
+    if abs(width) < 0.05 or abs(depth) < 0.05:
+        return created, [u"框选的区域太小（宽 {0:.0f} mm，深 {1:.0f} mm）".format(
+            abs(width) * FT_TO_MM, abs(depth) * FT_TO_MM)]
+    transaction = Transaction(doc, u"楼板布置：框选区域")
+    transaction.Start()
+    try:
+        shape = curve_array_from_points(points, level.Elevation)
+        create_floor_from_array(
+            shape, floor_type, level, thickness,
+            u"框选 {0:.0f}×{1:.0f}".format(abs(width) * FT_TO_MM, abs(depth) * FT_TO_MM),
+            failures, created)
+        if created:
+            transaction.Commit()
+        else:
+            transaction.RollBack()
+    except Exception:
+        try:
+            transaction.RollBack()
+        except Exception:
+            pass
+        failures.append(u"整体失败：{0}".format(traceback.format_exc()))
+    return created, failures
+
+
 def selected_rooms():
     rooms = []
     try:
@@ -433,14 +568,16 @@ def do_generate(rooms, floor_type, level, thickness_mm):
 SHELL_XAML = u"""
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="楼板布置" Height="560" Width="560"
+        Title="楼板布置" Height="600" Width="680"
         WindowStartupLocation="CenterScreen" ResizeMode="CanResize">
   <DockPanel Margin="12">
     <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal"
                 HorizontalAlignment="Right" Margin="0,10,0,0">
-      <Button x:Name="btnPick" Content="点内部生成" Width="110" Height="30" Margin="0,0,8,0"/>
-      <Button x:Name="btnSelected" Content="生成到选中房间" Width="140" Height="30" Margin="0,0,8,0"/>
-      <Button x:Name="btnClose" Content="关闭" Width="80" Height="30"/>
+      <Button x:Name="btnRegion" Content="点闭合区域" Width="110" Height="30" Margin="0,0,8,0"/>
+      <Button x:Name="btnRect" Content="框选区域" Width="100" Height="30" Margin="0,0,8,0"/>
+      <Button x:Name="btnPick" Content="点内部(房间)" Width="120" Height="30" Margin="0,0,8,0"/>
+      <Button x:Name="btnSelected" Content="生成到选中房间" Width="130" Height="30" Margin="0,0,8,0"/>
+      <Button x:Name="btnClose" Content="关闭" Width="72" Height="30"/>
     </StackPanel>
     <ScrollViewer VerticalScrollBarVisibility="Auto">
       <StackPanel>
@@ -472,7 +609,7 @@ SHELL_XAML = u"""
 
         <TextBlock Text="③ 用法" FontWeight="Bold" Margin="0,0,0,6"/>
         <TextBlock TextWrapping="Wrap" Foreground="#555555" Margin="0,0,0,10"
-                   Text="「点内部生成」：在房间中间点一下，按房间边界铺板，按 Esc 结束。&#10;「生成到选中房间」：先在平面里选中房间文字，再点这个按钮一次生成全部。&#10;房间必须已放置且边界闭合（面积不是“未闭合”），否则会被跳过并列出原因。"/>
+                   Text="「点闭合区域」：在墙围成的封闭区域里点一下，自动抓边界铺板（不用放房间），Esc 结束。&#10;「框选区域」：拉一个矩形框，直接铺一块矩形板，Esc 结束。&#10;「点内部(房间)」：按已放置房间的边界铺板。&#10;「生成到选中房间」：先选中房间文字，再一次生成全部。&#10;点闭合区域要求四周墙都勾了「房间边界」，缺口处可以用「房间分隔」补线。"/>
 
         <TextBlock Text="④ 预览" FontWeight="Bold" Margin="0,0,0,6"/>
         <TextBlock x:Name="preview" TextWrapping="Wrap" FontFamily="Consolas" FontSize="12"/>
@@ -515,6 +652,8 @@ class FloorWindow(forms.WPFWindow):
         if self.levelBox.Items.Count:
             self.levelBox.SelectedIndex = 0
 
+        self.btnRegion.Click += self._on_region
+        self.btnRect.Click += self._on_rect
         self.btnPick.Click += self._on_pick
         self.btnSelected.Click += self._on_selected
         self.btnClose.Click += self._on_close
@@ -533,6 +672,8 @@ class FloorWindow(forms.WPFWindow):
         has_rooms = len(rooms) > 0
         self.btnPick.IsEnabled = has_rooms
         self.btnSelected.IsEnabled = has_rooms
+        self.btnRegion.IsEnabled = True
+        self.btnRect.IsEnabled = True
 
     def _chosen_type(self):
         index = self.typeBox.SelectedIndex
@@ -588,6 +729,35 @@ class FloorWindow(forms.WPFWindow):
 
     # ---------- 按钮 ----------
 
+    def _guess_level(self, point):
+        """点选区域用：先按点找房间，找不到用当前视图的标高。"""
+        try:
+            room = room_at(point)
+            if room is not None:
+                found = _room_level(room)
+                if found is not None:
+                    return found
+        except Exception:
+            pass
+        try:
+            view_level = doc.GetElement(uidoc.ActiveView.LevelId)
+            if view_level is not None:
+                return view_level
+        except Exception:
+            pass
+        levels = all_levels()
+        if levels:
+            return levels[0]
+        return None
+
+    def _on_region(self, sender, args):
+        self.action = "region"
+        self.Close()
+
+    def _on_rect(self, sender, args):
+        self.action = "rect"
+        self.Close()
+
     def _on_pick(self, sender, args):
         self.action = "pick"
         self.Close()
@@ -626,9 +796,8 @@ def main():
         forms.alert(u"项目里没有标高。", title=u"楼板布置")
         return
     if not all_rooms():
-        forms.alert(u"当前项目没有房间图元。\n请先放置房间（建筑 → 房间和面积 → 房间），"
-                    u"并确保房间边界闭合。", title=u"楼板布置")
-        return
+        write_log([u"提示：项目里没有房间图元，房间相关按钮会禁用；"
+                   u"「点闭合区域」「框选区域」不受影响。"])
 
     window = FloorWindow(floor_types, levels)
     window.ShowDialog()
@@ -640,6 +809,55 @@ def main():
     thickness = window._thickness()
     if floor_type is None:
         forms.alert(u"没有选择板类型。", title=u"楼板布置")
+        return
+
+    if window.action == "region":
+        count = 0
+        failures_total = []
+        while True:
+            try:
+                point = uidoc.Selection.PickPoint(u"在闭合区域里点一下（Esc 结束）")
+            except Exception:
+                break
+            use_level = level if level is not None else window._guess_level(point)
+            if use_level is None:
+                failures_total.append(u"找不到该点所在的标高")
+                continue
+            created, failures = generate_click_region(
+                point, use_level, floor_type, thickness, u"点选区域")
+            count += len(created)
+            failures_total.extend(failures)
+        lines = [u"点闭合区域：成功 {0} 块，失败 {1} 块".format(count, len(failures_total))]
+        for item in failures_total:
+            lines.append(u"· " + item)
+        write_log([u"---- 楼板布置（点闭合区域） ----"] + lines)
+        forms.alert(u"\n".join(lines), title=u"楼板布置")
+        return
+
+    if window.action == "rect":
+        count = 0
+        failures_total = []
+        while True:
+            try:
+                p1 = uidoc.Selection.PickPoint(u"点矩形的第一个角（Esc 结束）")
+            except Exception:
+                break
+            try:
+                p2 = uidoc.Selection.PickPoint(u"点矩形的对角")
+            except Exception:
+                break
+            use_level = level if level is not None else window._guess_level(p1)
+            if use_level is None:
+                failures_total.append(u"找不到该角点所在的标高")
+                continue
+            created, failures = generate_rect_region(p1, p2, use_level, floor_type, thickness)
+            count += len(created)
+            failures_total.extend(failures)
+        lines = [u"框选区域：成功 {0} 块，失败 {1} 块".format(count, len(failures_total))]
+        for item in failures_total:
+            lines.append(u"· " + item)
+        write_log([u"---- 楼板布置（框选区域） ----"] + lines)
+        forms.alert(u"\n".join(lines), title=u"楼板布置")
         return
 
     if window.action == "selected":

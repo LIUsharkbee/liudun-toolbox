@@ -234,7 +234,9 @@ ADDIN_DIRS = [
     r"C:\ProgramData\Autodesk\Revit\Addins\2020",
 ]
 
-KEEP_IN_MATCH = ("liudun", "六吨", "ths", "斯维尔", "tangent", "sware")
+KEEP_IN_MATCH = ("liudun", "六吨", "ths", "斯维尔", "tangent", "sware",
+                 "goujianwu", "gjw", "构件坞")
+NEVER_DISABLE = ("liudun", "goujianwu", "gjw", "构件坞")
 
 
 def addin_title(path):
@@ -442,11 +444,22 @@ class OptimizeWindow(forms.WPFWindow):
                 picked.append(self._addins[index])
         return picked
 
+    def _confirm_switch(self):
+        answer = forms.alert(
+            u"插件开关只是改文件后缀，不会立刻加载或卸载。\n\n"
+            u"注意：Revit 正在运行时改名，个别插件（例如构件坞）可能直接让 Revit 崩溃。\n"
+            u"正确做法：先保存文件 → 切换 → 立刻重启 Revit。\n\n继续吗？",
+            title=u"插件管理", yes=True, no=True)
+        return answer in (True, u"Yes", u"yes", u"是")
+
     def _apply_addin(self, items, enable):
+        if not self._confirm_switch():
+            return False
         done = []
         skipped = []
         for item in items:
-            if (not enable) and ("liudun" in item["path"].lower()):
+            if (not enable) and any(word in item["path"].lower()
+                                   for word in NEVER_DISABLE):
                 skipped.append(item["file"])
                 continue
             try:
@@ -485,6 +498,8 @@ class OptimizeWindow(forms.WPFWindow):
             u"其他全部停用（改 .addin 后缀，不删文件）。\n\n继续吗？",
             title=u"插件管理", yes=True, no=True)
         if answer not in (True, u"Yes", u"yes", u"是"):
+            return
+        if not self._confirm_switch():
             return
         keep, drop = [], []
         for item in self._addins:

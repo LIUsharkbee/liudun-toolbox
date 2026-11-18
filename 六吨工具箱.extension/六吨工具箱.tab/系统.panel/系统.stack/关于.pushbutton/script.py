@@ -27,10 +27,23 @@ RELEASES_URL = REPO_URL + "/releases"
 ISSUES_URL = REPO_URL + "/issues"
 
 
+FALLBACK_VERSION = u"1.3.16"
+
+
 def extension_root():
-    here = os.path.abspath(__file__)
-    # ...\六吨工具箱.extension\六吨工具箱.tab\系统.panel\系统.stack\关于.pushbutton\script.py
-    return os.path.abspath(os.path.join(os.path.dirname(here), "..", "..", "..", ".."))
+    """向上找带 version.json 或 六吨工具箱.tab 的目录（兼容 pyRevit 扩展与独立版）。"""
+    here = os.path.dirname(os.path.abspath(__file__))
+    cur = here
+    for _ in range(8):
+        if (os.path.isfile(os.path.join(cur, "version.json"))
+                or os.path.isdir(os.path.join(cur, u"六吨工具箱.tab"))
+                or os.path.isfile(os.path.join(cur, "manifest.txt"))):
+            return cur
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            break
+        cur = parent
+    return os.path.abspath(os.path.join(here, "..", "..", "..", ".."))
 
 
 def read_version():
@@ -43,7 +56,7 @@ def read_version():
                 return data.get("version", u"?"), data.get("edition", u"")
             except Exception:
                 pass
-    return u"?", u""
+    return FALLBACK_VERSION, u""
 
 
 def open_url(url):
@@ -74,7 +87,9 @@ def main():
     <Border BorderBrush="#263043" BorderThickness="2" CornerRadius="12" Padding="14" Background="#FFF3FCF8">
       <StackPanel>
         <TextBlock Text="作者" FontWeight="Bold"/>
-        <TextBlock x:Name="authorText" Text="%s" Margin="0,4,0,10"/>
+        <TextBlock x:Name="authorText" Text="%s" Margin="0,4,0,4"/>
+        <TextBlock Text="共创作者" FontWeight="Bold"/>
+        <TextBlock x:Name="coauthorText" Text="%s" Margin="0,4,0,10"/>
         <TextBlock Text="仓库" FontWeight="Bold"/>
         <TextBlock Text="%s" Margin="0,4,0,10" Foreground="#2F5D9E"/>
         <TextBlock Text="问题反馈" FontWeight="Bold"/>
@@ -94,7 +109,7 @@ def main():
       <Button x:Name="closeBtn" Content="关闭" Height="36" Width="90"/>
     </StackPanel>
   </StackPanel>
-</Window>""" % (title, version, u"LIUsharkbee（六吨）", REPO_URL, ISSUES_URL)
+</Window>""" % (title, version, u"LIUsharkbee（六吨）", u"wangfeng-998", REPO_URL, ISSUES_URL)
 
     window = forms.WPFWindow(xaml, literal_string=True)
     window.FindName("starBtn").Click += lambda s, e: open_url(REPO_URL + "/stargazers")

@@ -25,10 +25,10 @@ from System.Collections.Generic import List as DotNetList
 from Autodesk.Revit.DB import (
     BuiltInCategory, BuiltInParameter, Element, ElementId, FilteredElementCollector,
     IFailuresPreprocessor, FailureProcessingResult, FailureSeverity,
-    Level, Line, Transaction, XYZ, StorageType,
+    Level, Line, Transaction, XYZ, StorageType, StairsEditScope,
 )
 from Autodesk.Revit.DB.Architecture import (
-    Stairs, StairsEditScope, StairsLanding, StairsRun, StairsRunJustification,
+    Stairs, StairsLanding, StairsRun, StairsRunJustification,
     StairsRunStyle, StairsType,
 )
 from Autodesk.Revit.DB.ExtensibleStorage import (

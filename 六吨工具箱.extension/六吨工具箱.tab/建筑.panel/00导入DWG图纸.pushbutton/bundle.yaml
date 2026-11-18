@@ -1,4 +1,4 @@
 title: 导入DWG图纸
-tooltip: 六吨工具箱 · 多选 DWG 按毫米/原点导入当前视图，自动半调+黑线做底图；同名可覆盖重导
+tooltip: 六吨工具箱 · 多选 DWG 按毫米/原点导入当前视图，保持图纸原色并自动解锁；同名可覆盖重导
 author: 六吨
 min_revit_version: 2020

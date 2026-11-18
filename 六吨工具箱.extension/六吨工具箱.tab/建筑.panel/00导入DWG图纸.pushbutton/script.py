@@ -131,10 +131,22 @@ def make_options(view):
 
 
 def apply_override(view, element_id):
+    """（保留，默认不调用）半调 + 黑色线覆盖。
+
+    注意：半调会让图纸整体变灰、线色被改成黑色，斯维尔等识别类工具
+    会因此识别失败，所以导入时保持原色，不做任何图形替换。
+    """
     settings = OverrideGraphicSettings()
-    settings.Halftone = True
-    settings.ProjectionLineColor = Color(0, 0, 0)
-    settings.CutLineColor = Color(0, 0, 0)
+    # 2020 里 Halftone / ProjectionLineColor / CutLineColor 都是只读属性，必须用 Set* 方法
+    try:
+        settings.SetHalftone(True)
+    except Exception:
+        pass
+    try:
+        settings.SetProjectionLineColor(Color(0, 0, 0))
+        settings.SetCutLineColor(Color(0, 0, 0))
+    except Exception:
+        pass
     view.SetElementOverrides(element_id, settings)
 
 
@@ -297,7 +309,6 @@ def main():
                 if imported_id is None or imported_id == ElementId.InvalidElementId:
                     failed.append((name, u"导入没有返回图元"))
                     continue
-                apply_override(view, imported_id)
                 instance = doc.GetElement(imported_id)
                 if instance is not None:
                     try:

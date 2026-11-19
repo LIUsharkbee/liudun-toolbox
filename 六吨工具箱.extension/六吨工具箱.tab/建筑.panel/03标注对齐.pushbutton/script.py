@@ -27,7 +27,8 @@ clr.AddReference("PresentationFramework")
 from System.Collections.Generic import List as DotNetList
 
 from Autodesk.Revit.DB import (
-    Dimension, ElementId, ElementTransformUtils, Line, Transaction, XYZ,
+    Dimension,
+    Grid, ElementId, ElementTransformUtils, Line, Transaction, XYZ,
 )
 from Autodesk.Revit.UI.Selection import ObjectType
 
@@ -221,14 +222,27 @@ class AlignWindow(forms.WPFWindow):
         self.mode_box.SelectedIndex = 0
         self.hint_text.Text = (u"先在平面视图里框选/点选多个尺寸标注（至少 2 个），"
                                u"第一个选中的作为基准，再点「对齐」。")
-        self.FindName("btnRefresh").Click += self._on_refresh
-        self.FindName("btnRun").Click += self._on_run
-        self.FindName("btnClose").Click += self._on_close
+        self.FindName("btnRefresh").Click += self._guard(self._on_refresh)
+        self.FindName("btnRun").Click += self._guard(self._on_run)
+        self.FindName("btnClose").Click += self._guard(self._on_close)
         self.dimensions = []
         self.result = None
         self._on_refresh(None, None)
 
     # ---------- 交互 ----------
+    def _guard(self, handler):
+        def wrapped(sender, args):
+            try:
+                handler(sender, args)
+            except Exception:
+                text = traceback.format_exc()
+                log_line(text)
+                try:
+                    forms.alert(u"操作出错（已阻止崩溃）：\n%s" % text[-600:], title=u"标注对齐")
+                except Exception:
+                    pass
+        return wrapped
+
     def _on_refresh(self, sender, args):
         self.dimensions = selected_dimensions()
         self.scope_text.Text = u"当前选中 %d 个尺寸标注。" % len(self.dimensions)
@@ -258,7 +272,7 @@ class AlignWindow(forms.WPFWindow):
                             u"请在图纸里点选「尺寸标注」的文字或尺寸线，再点对齐。"
                             % (others + grids, grids), title=u"标注对齐")
             else:
-                forms.alert(u"请先选中至少 2 个尺寸标注（现在选中 %d 个）。" % len(dims),
+                forms.alert(u"请先选中至少 2 个尺寸标注（现在选中 %d 个）。" % dims,
                             title=u"标注对齐")
             return
         mode = ["line", "text", "both"][max(0, min(2, self.mode_box.SelectedIndex))]

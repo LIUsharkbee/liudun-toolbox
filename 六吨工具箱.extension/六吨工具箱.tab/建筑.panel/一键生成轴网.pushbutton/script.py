@@ -674,40 +674,59 @@ def set_double_bubble(grid):
 
 
 def rename_all(state):
-    records = state.get("records") or []
-    if not records:
-        forms.alert(u"还没有生成任何轴线。", title=u"轴网生成工具")
+    """把当前视图的轴网按方向重排：竖向 1,2,3…（左→右），横向 A,B,C…（下→上）。"""
+    grids = []
+    try:
+        collector = FilteredElementCollector(doc, doc.ActiveView.Id).OfClass(Grid)
+        grids = [element for element in collector]
+    except Exception:
+        grids = []
+    if not grids:
+        collector = FilteredElementCollector(doc).OfClass(Grid)
+        grids = [element for element in collector]
+    if not grids:
+        forms.alert(u"当前视图里没有轴网。", title=u"轴网生成工具")
         return
-    vertical = sorted([r for r in records if r["vertical"]], key=lambda r: r["position"])
-    horizontal = sorted([r for r in records if not r["vertical"]], key=lambda r: r["position"])
-    used = existing_names()
+
+    vertical = []
+    horizontal = []
+    for grid in grids:
+        try:
+            curve = grid.Curve
+            start = curve.GetEndPoint(0)
+            end = curve.GetEndPoint(1)
+        except Exception:
+            continue
+        dx = abs(end.X - start.X)
+        dy = abs(end.Y - start.Y)
+        if dx < dy:
+            vertical.append(((start.X + end.X) * 0.5, grid))
+        else:
+            horizontal.append(((start.Y + end.Y) * 0.5, grid))
+    vertical.sort(key=lambda item: item[0])
+    horizontal.sort(key=lambda item: item[0])
+
+    log_line(u"[rename] 竖轴=%d 横轴=%d" % (len(vertical), len(horizontal)))
     transaction = Transaction(doc, u"重排轴号")
     transaction.Start()
     try:
-        for index, record in enumerate(vertical):
-            grid = doc.GetElement(record["id"])
-            if grid is not None:
-                set_double_bubble(grid)
-            if grid is None:
-                continue
-            new_name = unique_name(u"%d" % (index + 1), used)
-            set_grid_name(grid, new_name)
-            record["name"] = new_name
-        for index, record in enumerate(horizontal):
-            grid = doc.GetElement(record["id"])
-            if grid is not None:
-                set_double_bubble(grid)
-            if grid is None:
-                continue
-            new_name = unique_name(letter_name(index), used)
-            set_grid_name(grid, new_name)
-            record["name"] = new_name
+        # 先全部改成临时名，避免互相冲突
+        for index, (_position, grid) in enumerate(vertical + horizontal):
+            set_grid_name(grid, u"__tmp_%d" % index)
+        for index, (_position, grid) in enumerate(vertical):
+            set_grid_name(grid, u"%d" % (index + 1))
+        for index, (_position, grid) in enumerate(horizontal):
+            set_grid_name(grid, letter_name(index))
         transaction.Commit()
     except Exception:
         transaction.RollBack()
-    state["vertical"] = [(u"v", r["name"], r["position"]) for r in vertical]
-    state["horizontal"] = [(u"h", r["name"], r["position"]) for r in horizontal]
-    forms.alert(u"已重排：竖轴 %d 根（1、2、3…）、横轴 %d 根（A、B、C…）。"
+        forms.alert(u"重排失败：%s" % traceback.format_exc().splitlines()[-1],
+                    title=u"轴网生成工具")
+        return
+
+    state["vertical"] = [(u"v", u"%d" % (index + 1), position) for index, (position, _g) in enumerate(vertical)]
+    state["horizontal"] = [(u"h", letter_name(index), position) for index, (position, _g) in enumerate(horizontal)]
+    forms.alert(u"已重排：竖轴 %d 根（1、2、3…从左到右）、横轴 %d 根（A、B、C…从下到上）。"
                 % (len(vertical), len(horizontal)), title=u"轴网生成工具")
 
 

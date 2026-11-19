@@ -336,7 +336,31 @@ def faces_for_element(element, is_wall, is_floor):
                     faces.append(face)
             else:
                 faces.append(face)
+    if is_wall:
+        return _dominant_wall_faces(faces)
     return faces
+
+
+def _dominant_wall_faces(faces):
+    """墙只保留面积最大的两个相反朝向面，避免洞口/转角把墙拆成很多片。"""
+    scored = []
+    for face in faces:
+        area = safe_call(lambda f=face: f.Area, 0.0) or 0.0
+        normal = safe_call(lambda f=face: f.FaceNormal, None)
+        if normal is None:
+            continue
+        key = (1 if normal.X >= 0 else -1, 0) if abs(normal.X) >= abs(normal.Y) else (0, 1 if normal.Y >= 0 else -1)
+        scored.append((area, key, face))
+    if not scored:
+        return []
+    top = max(item[0] for item in scored)
+    scored = [item for item in scored if item[0] >= max(top * 0.30, 0.15)]
+    best = {}
+    for area, key, face in scored:
+        if key not in best or area > best[key][0]:
+            best[key] = (area, face)
+    ordered = sorted(best.values(), key=lambda kv: kv[0], reverse=True)
+    return [face for area, face in ordered]
 
 
 def build_panel_on_face(element, face, material_id, thickness_mm):
@@ -427,7 +451,7 @@ def diagnose(elements):
 
 SHELL_XAML = u"""<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-    Title="材质贴面" Height="780" Width="1140" WindowStartupLocation="CenterScreen">
+    Title="材质贴面 · 装修" Height="900" Width="760" WindowStartupLocation="Manual">
   <Grid Margin="10">
     <Grid.RowDefinitions>
       <RowDefinition Height="Auto"/>
@@ -449,12 +473,47 @@ SHELL_XAML = u"""<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/pre
     <Grid Grid.Row="1">
       <Grid.ColumnDefinitions>
         <ColumnDefinition Width="*"/>
-        <ColumnDefinition Width="300"/>
+        <ColumnDefinition Width="250"/>
       </Grid.ColumnDefinitions>
 
-      <TabControl Grid.Column="0">
+      <TabControl x:Name="tabMain" Grid.Column="0">
         <TabItem Header="材质库">
           <ListBox x:Name="materialList" Margin="4"/>
+        </TabItem>
+        <TabItem Header="装修贴面">
+          <ScrollViewer VerticalScrollBarVisibility="Auto">
+            <StackPanel Margin="8">
+              <TextBlock TextWrapping="Wrap" Margin="0,0,0,8"
+                         Text="先选好墙或门窗，再点下面的按钮。生成的贴面是独立实体，不改原构件。"/>
+              <Grid Margin="0,0,0,8">
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/>
+                  <ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+                <TextBlock Grid.Column="0" Text="离墙偏移" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                <TextBox Grid.Column="1" x:Name="trimOffset" Text="20" Height="28" Margin="0,0,14,0"/>
+                <TextBlock Grid.Column="2" Text="贴面厚度" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                <TextBox Grid.Column="3" x:Name="trimThick" Text="10" Height="28"/>
+              </Grid>
+              <Grid Margin="0,0,0,8">
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/>
+                  <ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+                <TextBlock Grid.Column="0" Text="圆角半径" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                <TextBox Grid.Column="1" x:Name="trimRadius" Text="120" Height="28" Margin="0,0,14,0"/>
+                <TextBlock Grid.Column="2" Text="封边宽度" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                <TextBox Grid.Column="3" x:Name="trimBorder" Text="10" Height="28"/>
+              </Grid>
+              <CheckBox x:Name="trimBoth" Content="墙的两面都做" IsChecked="False" Margin="0,0,0,8"/>
+              <Button x:Name="btnTrimWall" Content="① 墙面贴面（用选中的墙，跟随真实轮廓）" Height="32" Margin="0,4,0,0"/>
+              <Button x:Name="btnTrimOpening" Content="② 洞口封边（用选中的门窗）" Height="32" Margin="0,6,0,0"/>
+              <Button x:Name="btnTrimPick" Content="③ 洞口封边（点洞口左右两个面）" Height="32" Margin="0,6,0,0"/>
+              <Button x:Name="btnFilletFace" Content="④ 墙体倒圆角（选两面相邻的墙）" Height="32" Margin="0,6,0,0"/>
+              <TextBlock x:Name="trimStatus" TextWrapping="Wrap" Margin="0,10,0,0"
+                         FontSize="12" Opacity="0.85"/>
+            </StackPanel>
+          </ScrollViewer>
         </TabItem>
         <TabItem Header="图片墙纸">
           <Grid Margin="4">
@@ -533,9 +592,73 @@ def material_texture_path(material):
     return None
 
 
+try:
+    import sys
+    import os as _os
+    try:
+        _here = _os.path.dirname(_os.path.abspath(__file__))
+    except Exception:
+        _here = u""
+    if _here and _here not in sys.path:
+        sys.path.insert(0, _here)
+    sys.modules.pop("trim_core", None)
+    import trim_core
+    pass
+except Exception:
+    trim_core = None
+    try:
+        _wlog(u"[import] trim_core failed: " + traceback.format_exc()[-300:])
+    except Exception:
+        pass
+
+
+LOG_PATH = u"C:\\Users\\cyl\\Documents\\deepseek-harness\\default-workspace\\_装修日志.txt"
+
+
+def _wlog(text):
+    try:
+        handle = open(LOG_PATH, "ab")
+        handle.write((u"%s\n" % text).encode("utf-8"))
+        handle.close()
+    except Exception:
+        pass
+
+
+try:
+    if trim_core is not None:
+        _wlog(u"[core] version=" + getattr(trim_core, "CORE_VERSION", u"?"))
+except Exception:
+    pass
+
+
 class MaterialWindow(forms.WPFWindow):
     def __init__(self):
         forms.WPFWindow.__init__(self, SHELL_XAML, literal_string=True)
+        try:
+            from System.Windows import SystemParameters
+            self.Left = 0.0
+            self.Top = 80.0
+            self.Height = max(600.0, SystemParameters.WorkArea.Height - 120.0)
+        except Exception:
+            pass
+        _wlog(u"[init] window built")
+        try:
+            self._bound = set()
+            self._wire_tabs()
+            _wlog(u"[init] wire done")
+        except Exception:
+            import traceback as _tb
+            _wlog(u"[init] wire error: " + _tb.format_exc()[-400:])
+        try:
+            self.Loaded += self._on_loaded_wire
+        except Exception:
+            pass
+        try:
+            _tab = self.FindName("tabMain")
+            if _tab is not None:
+                _tab.SelectionChanged += self._on_tab_changed
+        except Exception:
+            pass
         self.search_box = self.FindName("searchBox")
         self.status = self.FindName("status")
         self.material_list = self.FindName("materialList")
@@ -550,6 +673,8 @@ class MaterialWindow(forms.WPFWindow):
         self.visible_materials = []
         self.images = []
         self.choice = None
+        self.action = None
+        self.action_params = None
 
         self.search_box.TextChanged += self._on_search
         self.material_list.SelectionChanged += self._on_material_selected
@@ -591,9 +716,13 @@ class MaterialWindow(forms.WPFWindow):
         self._fill_materials()
         self._clear_preview()
         self.choice = None
+        self.action = None
+        self.action_params = None
 
     def _on_refresh(self, sender, args):
         self.choice = None
+        self.action = None
+        self.action_params = None
         self._load()
 
     def _on_material_selected(self, sender, args):
@@ -756,11 +885,298 @@ class MaterialWindow(forms.WPFWindow):
         forms.alert(text[:1200], title=u"材质贴面 · 诊断")
 
 
+
+    # ---------------- 装修贴面 ----------------
+    def _trim_value(self, name, default):
+        try:
+            text = self.FindName(name).Text.strip()
+            return float(text) if text else default
+        except Exception:
+            return default
+
+    def _trim_params(self):
+        return {
+            "offset_mm": self._trim_value("trimOffset", 20.0),
+            "thick_mm": self._trim_value("trimThick", 10.0),
+            "radius_mm": self._trim_value("trimRadius", 120.0),
+            "border_mm": self._trim_value("trimBorder", 10.0),
+            "both_sides": bool(self.FindName("trimBoth").IsChecked),
+        }
+
+    def _trim_report(self, created, failures):
+        lines = [u"成功 %d 个，失败 %d 个。" % (created, len(failures))]
+        if failures:
+            lines.extend([u""] + failures[:8])
+        try:
+            self.FindName("trimStatus").Text = u"\n".join(lines)
+        except Exception:
+            pass
+        return lines
+
+    def _walls_selected(self):
+        walls = []
+        try:
+            ids = revit.uidoc.Selection.GetElementIds()
+        except Exception:
+            return walls
+        for element_id in ids:
+            element = revit.doc.GetElement(element_id)
+            if element.__class__.__name__.lower().endswith("wall"):
+                walls.append(element)
+        return walls
+
+    def _openings_selected(self):
+        result = []
+        try:
+            ids = revit.uidoc.Selection.GetElementIds()
+        except Exception:
+            return result
+        for element_id in ids:
+            element = revit.doc.GetElement(element_id)
+            if element is None or element.Category is None:
+                continue
+            category = element.Category.Id.IntegerValue
+            if category in (-2000023, -2000014):  # OST_Doors / OST_Windows
+                result.append(element)
+        return result
+
+    def _wrap_click(self, label, handler):
+        def _inner(sender, args):
+            self._safe_click(label, handler, sender, args)
+        return _inner
+
+    def _wire_tabs(self):
+        _wlog(u"[wire] enter")
+        for name, label, handler in (
+                ("btnTrimWall", u"墙面贴面", self._on_trim_wall),
+                ("btnTrimOpening", u"洞口封边", self._on_trim_opening),
+                ("btnTrimPick", u"点两面封边", self._on_trim_pick),
+                ("btnFilletFace", u"墙体倒圆角", self._on_fillet_face)):
+            if name in self._bound:
+                continue
+            try:
+                control = self.FindName(name)
+                _wlog(u"[wire] %s -> %s" % (name, u"None" if control is None else u"ok"))
+                if control is None:
+                    continue
+                control.Click += self._wrap_click(label, handler)
+                self._bound.add(name)
+            except Exception:
+                import traceback as _tb
+                _wlog(u"[wire] %s error: %s" % (name, _tb.format_exc()[-300:]))
+
+    def _on_loaded_wire(self, sender, args):
+        try:
+            self._wire_tabs()
+        except Exception:
+            pass
+
+    def _on_tab_changed(self, sender, args):
+        try:
+            self._wire_tabs()
+        except Exception:
+            pass
+
+    def _safe_click(self, name, func, sender, args):
+        _wlog(u"[click] " + name)
+        try:
+            func(sender, args)
+        except Exception:
+            import traceback as _tb
+            _wlog(u"[error] %s" % _tb.format_exc()[-500:])
+            forms.alert(u"%s 出错：\n%s" % (name, _tb.format_exc()[-700:]), title=u"装修贴面")
+
+    def _trace(self, text):
+        _wlog(u"[trace] " + text)
+
+    def _on_trim_wall(self, sender, args):
+        self._trace(u'点击 _on_trim_wall')
+        if trim_core is None:
+            forms.alert(u"缺少 trim_core.py，请重新安装。", title=u"装修贴面")
+            return
+        walls = self._walls_selected()
+        if not walls:
+            forms.alert(u"请先选中墙。", title=u"装修贴面")
+            return
+        params = self._trim_params()
+        params["walls"] = walls
+        created, failures = trim_core.run_action(revit.doc, "wall", params)
+        self._trim_report(created, failures)
+
+    def _on_trim_opening(self, sender, args):
+        self._trace(u'点击 _on_trim_opening')
+        if trim_core is None:
+            forms.alert(u"缺少 trim_core.py，请重新安装。", title=u"装修贴面")
+            return
+        openings = self._openings_selected()
+        if not openings:
+            forms.alert(u"请先选中门或窗。", title=u"装修贴面")
+            return
+        params = self._trim_params()
+        params["openings"] = openings
+        params["out_mm"] = params["thick_mm"]
+        created, failures = trim_core.run_action(revit.doc, "trim", params)
+        self._trim_report(created, failures)
+
+    def _on_trim_pick(self, sender, args):
+        self._trace(u'点击 _on_trim_pick')
+        self.action = "trim_pick"
+        self.action_params = self._trim_params()
+        self.Close()
+
+    def _selected_faces(self):
+        """当前选中构件上可取的面：墙取最大两个竖面，楼板取顶面，其它取最大面。"""
+        if trim_core is None:
+            return []
+        picked = []
+        try:
+            ids = list(revit.uidoc.Selection.GetElementIds())
+        except Exception:
+            return []
+        for element_id in ids:
+            element = revit.doc.GetElement(element_id)
+            if element is None:
+                continue
+            faces = []
+            try:
+                faces = trim_core.vertical_faces(element)
+            except Exception:
+                faces = []
+            if not faces:
+                continue
+            rows = []
+            for row in faces:
+                if isinstance(row, tuple):
+                    rows.append(row[0])
+                else:
+                    rows.append(row)
+            rows = trim_core.pick_largest_faces(rows, 2 if len(rows) > 1 else 1)
+            for face in rows:
+                picked.append((element, face, None))
+        return picked
+
+    def _selected_walls(self):
+        walls = []
+        ids = []
+        try:
+            ids = list(revit.uidoc.Selection.GetElementIds())
+        except Exception:
+            _wlog(u"[walls] 取选择集失败")
+            return walls
+        _wlog(u"[walls] 选中 %d 个图元" % len(ids))
+        for element_id in ids:
+            element = revit.doc.GetElement(element_id)
+            if element is None:
+                continue
+            category_name = u""
+            try:
+                if element.Category is not None:
+                    category_name = element.Category.Name
+            except Exception:
+                category_name = u"?"
+            class_name = element.GetType().Name
+            _wlog(u"[walls] %s / %s / %s" % (element_id, class_name, category_name))
+            if class_name == "Wall" or category_name == u"墙":
+                walls.append(element)
+        return walls
+
+    def _on_fillet_face(self, sender, args):
+        self._trace(u'点击 墙体倒圆角')
+        if trim_core is None:
+            forms.alert(u"trim_core 未加载，请重装一次。", title=u"墙体圆角")
+            return
+        walls = self._selected_walls()
+        if len(walls) == 1:
+            cand = []
+            for pair in trim_core.neighbors_of(walls[0]):
+                if hasattr(pair[0], "Id"):
+                    cand.append(pair[0])
+            _wlog(u"[walls] 端点相接候选 %d" % len(cand))
+            if not cand:
+                for line in trim_core.wall_inventory():
+                    _wlog(line)
+                for pair in trim_core.crossing_walls(walls[0]):
+                    candidate = pair[1] if hasattr(pair[1], "Id") else pair[0]
+                    if hasattr(candidate, "Id"):
+                        cand.append(candidate)
+                _wlog(u"[walls] 3m 内候选 %d" % len(cand))
+            if cand:
+                walls = [walls[0], cand[0]]
+                _wlog(u"[walls] 自动配对 %s + %s" % (walls[0].Id, walls[1].Id))
+        if len(walls) == 1:
+            answer = forms.alert(u"文档里只有这 1 面墙，没有相邻墙。\n"
+                                 u"要把这面墙整体替换成「四角带圆角」的实体吗？（原墙会删除，可 Ctrl+Z）",
+                                 title=u"墙体圆角", yes=True, no=True)
+            if answer not in (True, u"Yes", u"yes", u"是"):
+                return
+            created, failures = trim_core.round_single_wall(walls[0], self._trim_value("trimRadius", 120.0))
+            text = u"已替换成圆角墙（半径 %.0f mm）" % self._trim_value("trimRadius", 120.0) if created else u"没有改动"
+            if failures:
+                text += u"\n" + failures[0]
+            self.status.Text = text
+            forms.alert(text, title=u"墙体圆角")
+            return
+        if len(walls) != 2:
+            forms.alert(u"请选中两面相邻的墙（Ctrl 多选），当前 %d 面。" % len(walls),
+                        title=u"墙体圆角")
+            return
+        radius = self._trim_value("trimRadius", 120.0)
+        try:
+            created, failures = trim_core.round_wall_corner(walls, radius)
+        except Exception:
+            forms.alert(traceback.format_exc()[-800:], title=u"墙体圆角失败")
+            return
+        if created:
+            text = u"已把转角做成圆角（外皮半径 %.0f mm）" % radius
+        else:
+            text = u"没有改动"
+        if failures:
+            text += u"\n失败 {0}：{1}".format(len(failures), failures[0])
+        self.status.Text = text
+        forms.alert(text, title=u"墙体圆角")
+
+
+def _perform_trim(uidoc, action, params):
+    count = 2 if action == "trim_pick" else 1
+    prompt = u"点洞口左右两个面" if action == "trim_pick" else u"点要倒圆角的面"
+    picks = trim_core.pick_faces_for_window(uidoc, count, prompt)
+    if not picks or len(picks) < count:
+        return 0, [u"取消或没点够 %d 个面" % count]
+    params = dict(params)
+    params["picks"] = picks
+    return trim_core.run_action(uidoc.Document, "fillet", params)
+
+
 def main():
     if doc is None:
         forms.alert(u"请先打开一个项目。", exitscript=True)
         return
-    MaterialWindow().ShowDialog()
+    message = None
+    while True:
+        window = MaterialWindow()
+        if message:
+            try:
+                window.status.Text = message
+            except Exception:
+                pass
+        window.ShowDialog()
+        action = getattr(window, "action", None)
+        params = getattr(window, "action_params", None)
+        if action not in ("trim_pick", "fillet"):
+            break
+        window = None
+        try:
+            created, failures = _perform_trim(revit.uidoc, action, params or {})
+            if failures:
+                message = u"生成 {0} 个，失败 {1} 个：{2}".format(
+                    created, len(failures), failures[0])
+            else:
+                message = u"已生成 {0} 个面".format(created)
+            output.print_md(u"### 装修贴面\n" + message)
+        except Exception:
+            message = u"出错：" + traceback.format_exc().splitlines()[-1]
+            output.print_md(u"### 装修贴面出错\n```\n{0}\n```".format(traceback.format_exc()))
+        continue
 
 
 try:

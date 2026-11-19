@@ -1,0 +1,4 @@
+title: 墙端自动对齐
+tooltip: 六吨工具箱 · 自动识别 T 型/L 型墙交接，把支墙端头贴到主墙面上并断开端部连接
+author: 六吨
+min_revit_version: 2020

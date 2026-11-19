@@ -25,9 +25,17 @@ Write-Host "正在解压..."
 Expand-Archive -Path $zip -DestinationPath $tmp -Force
 $payload = Join-Path $tmp "六吨工具箱"
 if (-not (Test-Path (Join-Path $payload "LiuDun.dll"))) {
-    Write-Host "解压后没有找到 LiuDun.dll，安装包可能不完整。"
-    if (-not $NoPause) { Read-Host "按回车退出" | Out-Null }
-    exit 1
+    # 兼容旧包/不同解压层级：递归找 LiuDun.dll
+    $found = Get-ChildItem -Path $tmp -Recurse -Filter "LiuDun.dll" -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($found) {
+        $payload = $found.Directory.FullName
+        Write-Host "安装包目录层级不同，已自动定位到：$payload"
+    } else {
+        Write-Host "解压后没有找到 LiuDun.dll，安装包可能不完整。"
+        Write-Host "临时目录：$tmp"
+        if (-not $NoPause) { Read-Host "按回车退出" | Out-Null }
+        exit 1
+    }
 }
 
 New-Item -ItemType Directory -Path $addins -Force | Out-Null

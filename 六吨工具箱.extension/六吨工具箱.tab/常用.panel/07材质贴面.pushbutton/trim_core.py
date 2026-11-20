@@ -21,6 +21,7 @@ from Autodesk.Revit.DB import (  # noqa: E402
     BuiltInCategory,
     BuiltInParameter,
     Color,
+    CompoundStructure,
     CurveLoop,
     DirectShape,
     Edge,
@@ -34,13 +35,17 @@ from Autodesk.Revit.DB import (  # noqa: E402
     FailureProcessingResult,
     FailureSeverity,
     Line,
+    LocationCurve,
     Material,
+    MaterialFunctionAssignment,
     Options,
     Plane,
     SolidOptions,
     Transaction,
     ViewDetailLevel,
     Wall,
+    WallKind,
+    WallType,
     XYZ,
 )
 from Autodesk.Revit.DB.Structure import StructuralType
@@ -51,7 +56,7 @@ from System.Collections.Generic import List as DotNetList  # noqa: E402
 from pyrevit import forms, revit  # noqa: E402
 
 
-CORE_VERSION = u"2026-11-19-h"
+CORE_VERSION = u"2026-11-21-k"
 
 MM_TO_FT = 1.0 / 304.8
 FT_TO_MM = 304.8
@@ -146,6 +151,40 @@ def vertical_faces(element):
             result.append((face, normal, face.Area))
     result.sort(key=lambda row: -row[2])
     return result[:2]
+
+
+def wall_side_normal(wall):
+    """墙的外侧法向（Revit 约定：Wall.Orientation 指向外侧）。"""
+    try:
+        orientation = wall.Orientation
+        flat = XYZ(orientation.X, orientation.Y, 0.0)
+        if flat.GetLength() > 1e-9:
+            return flat.Normalize()
+    except Exception:
+        pass
+    return None
+
+
+def choose_faces(wall, side):
+    """side: 'outer' | 'inner' | 'both'，返回 [(face, normal)]。"""
+    faces = vertical_faces(wall)
+    if not faces:
+        return []
+    if side == u"both":
+        return [(row[0], row[1]) for row in faces]
+    reference = wall_side_normal(wall)
+    if reference is None:
+        return [(faces[0][0], faces[0][1])]
+    scored = []
+    for face, normal, _area in faces:
+        try:
+            dot = normal.Normalize().DotProduct(reference)
+        except Exception:
+            dot = 0.0
+        scored.append((dot, face, normal))
+    scored.sort(key=lambda row: row[0])
+    pick = scored[0] if side == u"inner" else scored[-1]
+    return [(pick[1], pick[2])]
 
 
 def plane_basis(normal):
@@ -293,19 +332,131 @@ def is_rectangular(face, tolerance=1e-3):
     return lines == 4 and len(outer) == 4
 
 
-def build_wall_skin(walls, offset_mm, thickness_mm, radius_mm, material_id, both_sides):
+def thin_wall_type(doc, thickness_mm, material_id=None):
+    """找一个厚度接近的「基本墙」类型；没有就复制一个单层薄墙（贴面专用）。"""
+    target = mm(thickness_mm)
+    reuse = None
+    base = None
+    for wall_type in FilteredElementCollector(doc).OfClass(WallType):
+        try:
+            if wall_type.Kind != WallKind.Basic:
+                continue
+            structure = wall_type.GetCompoundStructure()
+            if structure is None:
+                continue
+            if base is None:
+                base = wall_type
+            if abs(structure.GetWidth() - target) <= mm(2.0):
+                reuse = wall_type
+                break
+        except Exception:
+            continue
+    if reuse is not None:
+        return reuse, u"复用类型"
+    if base is None:
+        return None, u"项目里没有基本墙类型"
+    try:
+        new_type = base.Duplicate(u"六吨-贴面-%dmm" % int(thickness_mm))
+        structure = CompoundStructure.CreateSingleLayerCompoundStructure(
+            MaterialFunctionAssignment.Finish1,
+            target,
+            material_id if material_id else ElementId.InvalidElementId,
+        )
+        new_type.SetCompoundStructure(structure)
+        check = new_type.GetCompoundStructure()
+        if check is not None and abs(check.GetWidth() - target) <= mm(2.0):
+            return new_type, u"新建类型"
+        log_line(u"[walltype] 厚度写回失败，期望 %.1fmm 实际 %.1fmm"
+                 % (thickness_mm, (check.GetWidth() * FT_TO_MM) if check else -1.0))
+    except Exception:
+        log_line(u"[walltype] 复制失败：%s" % traceback.format_exc())
+    return None, u"薄墙类型不可用"
+
+
+def build_wall_skin_as_walls(walls, offset_mm, thickness_mm, material_id, side=u"outer"):
+    """贴面做成「真墙」（每段轮廓边一段薄墙），能被按墙/面积提取。
+
+    借鉴小鲶鱼 FacedWallCore.CreatWall：真构件优先，DirectShape 只兜底。
+    """
+    doc = _active_doc()
+    wall_type, note = thin_wall_type(doc, thickness_mm, material_id)
+    if wall_type is None:
+        return 0, [note]
+    created = 0
+    failures = []
+    for wall in walls:
+        try:
+            faces = choose_faces(wall, side)
+            if not faces:
+                failures.append(u"%s：取不到竖直面" % wall.Id)
+                continue
+            level_id = wall.LevelId
+            base_z = None
+            for face, normal in faces:
+                loops = face.GetEdgesAsCurveLoops()
+                if loops is None or loops.Count == 0:
+                    failures.append(u"%s：面轮廓为空" % wall.Id)
+                    continue
+                outer = list(loops[0])
+                heights = []
+                for curve in outer:
+                    for point in (curve.GetEndPoint(0), curve.GetEndPoint(1)):
+                        heights.append(point.Z)
+                face_low = min(heights) if heights else None
+                face_high = max(heights) if heights else None
+                if face_low is None:
+                    continue
+                if base_z is None or face_low < base_z:
+                    base_z = face_low
+                shift = normal.Normalize() * mm(offset_mm + thickness_mm * 0.5)
+                height = face_high - face_low
+                for curve in outer:
+                    if not isinstance(curve, Line):
+                        continue
+                    start = curve.GetEndPoint(0) + shift
+                    end = curve.GetEndPoint(1) + shift
+                    if start.DistanceTo(end) < mm(10):
+                        continue
+                    line = Line.CreateBound(start, end)
+                    offset_ft = face_low - _level_elevation(level_id)
+                    Wall.Create(doc, line, wall_type.Id, level_id, height, offset_ft, False, False)
+                    created += 1
+        except Exception:
+            failures.append(u"%s：%s" % (wall.Id, traceback.format_exc().splitlines()[-1]))
+            log_line(u"[skin] %s" % traceback.format_exc())
+    return created, failures
+
+
+def _level_elevation(level_id):
+    try:
+        level = _active_doc().GetElement(level_id)
+        if level is not None:
+            return level.Elevation
+    except Exception:
+        pass
+    return 0.0
+
+
+def build_wall_skin(walls, offset_mm, thickness_mm, radius_mm, material_id, side=u"outer"):
+    """先尝试真墙（可被斯维尔按墙提取），失败再退 DirectShape。"""
+    real, real_failures = build_wall_skin_as_walls(
+        walls, offset_mm, thickness_mm, material_id, side)
+    if real > 0:
+        log_line(u"[skin] 真墙模式：%d 段，失败 %d 条" % (real, len(real_failures)))
+        return real, real_failures
+    log_line(u"[skin] 真墙模式不可用（%s），退回 DirectShape"
+             % (u"; ".join(real_failures[:2]) if real_failures else u"0 段"))
+
     loops_holder = DotNetList[GeometryObject]()
     created = 0
     failures = []
     for wall in walls:
         try:
-            faces = vertical_faces(wall)
+            faces = choose_faces(wall, side)
             if not faces:
                 failures.append(u"%s：取不到竖直面" % wall.Id)
                 continue
-            if not both_sides:
-                faces = faces[:1]
-            for face, normal, _area in faces:
+            for face, normal in faces:
                 info = face_corners(face)
                 if info is None:
                     failures.append(u"%s：面轮廓太小" % wall.Id)
@@ -1017,6 +1168,215 @@ def fillet_picked_faces(faces, radius_mm, offset_mm, thickness_mm, material_id):
     return created, failures
 
 
+# --------------------------------------------------------------------------
+# 装饰套件：窗台板 / 踢脚线 / 边倒圆角
+# --------------------------------------------------------------------------
+
+
+def wall_line_of(wall):
+    """返回 (start, end, direction)；非直线定位墙返回 None。"""
+    try:
+        location = wall.Location
+        if not isinstance(location, LocationCurve):
+            return None
+        curve = location.Curve
+        if not isinstance(curve, Line):
+            return None
+        return curve.GetEndPoint(0), curve.GetEndPoint(1), curve.Direction.Normalize()
+    except Exception:
+        return None
+
+
+def wall_geometry_info(wall):
+    """返回 (base_z, height, thickness)。"""
+    doc = _active_doc()
+    base_z = 0.0
+    try:
+        level = doc.GetElement(wall.LevelId)
+        base_z = level.Elevation
+    except Exception:
+        base_z = 0.0
+    offset = wall.get_Parameter(BuiltInParameter.WALL_BASE_OFFSET)
+    if offset is not None:
+        try:
+            base_z += offset.AsDouble()
+        except Exception:
+            pass
+    height = None
+    user_height = wall.get_Parameter(BuiltInParameter.WALL_USER_HEIGHT_PARAM)
+    if user_height is not None:
+        try:
+            height = user_height.AsDouble()
+        except Exception:
+            height = None
+    thickness = 0.0
+    try:
+        thickness = wall.Width
+    except Exception:
+        thickness = mm(200)
+    if height is None or height <= 0:
+        top = 0.0
+        try:
+            level = doc.GetElement(wall.LevelId)
+            top = level.Elevation
+        except Exception:
+            top = 0.0
+        height = mm(3000)
+    return base_z, height, thickness
+
+
+def build_skirting(walls, height_mm, thick_mm, material_id, side=u"outer"):
+    """沿墙脚生成踢脚线（真墙，薄墙类型）。"""
+    doc = _active_doc()
+    created = 0
+    failures = []
+    wall_type = thin_wall_type(doc, thick_mm, material_id)
+    if wall_type is None:
+        return 0, [u"建不出薄墙类型（厚度 %.0f mm）" % thick_mm]
+    for wall in walls:
+        info = wall_line_of(wall)
+        if info is None:
+            failures.append(u"%s：不是直线墙，跳过" % wall.Id)
+            continue
+        start, end, direction = info
+        base_z, height, thickness = wall_geometry_info(wall)
+        normal = direction.CrossProduct(XYZ.BasisZ).Normalize()
+        shift = thickness * 0.5 + mm(thick_mm) * 0.5 + mm(1.0)
+        sides = [u"outer", u"inner"] if side == u"both" else [side]
+        for which in sides:
+            offset_vector = normal * shift if which == u"outer" else normal * (-shift)
+            try:
+                line = Line.CreateBound(start + offset_vector, end + offset_vector)
+                Wall.Create(doc, line, wall_type.Id, wall.LevelId,
+                            mm(height_mm), 0.0, False, False)
+                created += 1
+            except Exception:
+                failures.append(u"%s：踢脚创建失败（%s）" % (wall.Id, which))
+    return created, failures
+
+
+def build_sill_board(openings, out_mm, ear_mm, thick_mm, material_id):
+    """门窗洞口下沿生成窗台板（磨石台）。"""
+    doc = _active_doc()
+    created = 0
+    failures = []
+    holder = DotNetList[GeometryObject]()
+    for element in openings:
+        wall = host_wall_of(element)
+        if wall is None:
+            failures.append(u"%s：找不到宿主墙" % element.Id)
+            continue
+        data = opening_box(element, wall)
+        if data is None:
+            failures.append(u"%s：洞口尺寸取不到" % element.Id)
+            continue
+        width, _height, center, axis, _start, _end = data
+        thickness = mm(200)
+        try:
+            thickness = wall.Width
+        except Exception:
+            thickness = mm(200)
+        normal = axis.CrossProduct(XYZ.BasisZ).Normalize()
+        box = element.get_BoundingBox(None)
+        if box is None:
+            failures.append(u"%s：取不到包围盒" % element.Id)
+            continue
+        top_z = box.Min.Z
+        half_u = width * 0.5 + mm(ear_mm)
+        half_v = mm(thick_mm) * 0.5
+        if half_u < mm(30) or half_v < mm(5):
+            failures.append(u"%s：尺寸太小" % element.Id)
+            continue
+        origin = XYZ(center.X, center.Y, top_z - half_v)
+        origin = origin - normal * (thickness * 0.5)
+        loop = rounded_rect_loop(origin, axis, XYZ.BasisZ, half_u, half_v, mm(3.0), 0.0)
+        loops = DotNetList[CurveLoop]()
+        loops.Add(loop)
+        try:
+            solid = extrude(loops, normal, thickness + mm(out_mm), material_id)
+            if solid is not None:
+                holder.Add(solid)
+                created += 1
+        except Exception:
+            failures.append(u"%s：窗台板拉伸失败" % element.Id)
+    if created:
+        try:
+            make_direct_shape(holder, u"窗台板")
+        except Exception:
+            failures.append(u"窗台板实体写入失败")
+    return created, failures
+
+
+def build_edge_round(walls, references, radius_mm, material_id):
+    """在选中的竖直棱角处放圆柱（近似倒圆角，不改原墙）。"""
+    doc = _active_doc()
+    created = 0
+    failures = []
+    radius = mm(radius_mm)
+    for reference in references or []:
+        try:
+            element = doc.GetElement(reference)
+        except Exception:
+            element = None
+        if element is None:
+            failures.append(u"取不到图元")
+            continue
+        try:
+            geometry = element.GetGeometryObjectFromReference(reference)
+        except Exception:
+            geometry = None
+        if not isinstance(geometry, Edge):
+            failures.append(u"选中的不是棱")
+            continue
+        try:
+            curve = geometry.AsCurve()
+        except Exception:
+            failures.append(u"棱取不到曲线")
+            continue
+        p0 = curve.GetEndPoint(0)
+        p1 = curve.GetEndPoint(1)
+        span = p1 - p0
+        if abs(span.Z) < span.GetLength() * 0.7:
+            failures.append(u"只处理竖直棱")
+            continue
+        corner = XYZ(p0.X, p0.Y, min(p0.Z, p1.Z))
+        wall = element if isinstance(element, Wall) else host_wall_of(element)
+        info = wall_line_of(wall) if wall is not None else None
+        if info is None:
+            failures.append(u"%s：不是直线墙，跳过" % element.Id)
+            continue
+        _start, _end, direction = info
+        normal = direction.CrossProduct(XYZ.BasisZ).Normalize()
+        best = None
+        for sign_n in (1.0, -1.0):
+            for sign_d in (1.0, -1.0):
+                candidate = corner - normal * (sign_n * radius) - direction * (sign_d * radius)
+                score = (candidate - corner).GetLength()
+                if best is None:
+                    best = candidate
+                else:
+                    # 选更靠墙内的那个：用候选点到墙定位线的距离比较
+                    pass
+        # 直接取「沿两个相邻面内缩」的组合：法向向内 + 轴向指向墙内
+        base_z, height, _thickness = wall_geometry_info(wall)
+        center_xy = corner - normal * radius
+        center_probe = XYZ(center_xy.X, center_xy.Y, base_z)
+        loop = circle_loop(center_probe, radius, XYZ.BasisX, XYZ.BasisY)
+        loops = DotNetList[CurveLoop]()
+        loops.Add(loop)
+        top = corner.Z + max(height - (corner.Z - base_z), mm(100))
+        try:
+            solid = extrude(loops, XYZ.BasisZ, top - base_z, material_id)
+            if solid is not None:
+                holder = DotNetList[GeometryObject]()
+                holder.Add(solid)
+                make_direct_shape(holder, u"边倒圆角")
+                created += 1
+        except Exception:
+            failures.append(u"%s：圆柱生成失败" % element.Id)
+    return created, failures
+
+
 def run_action(doc, action, params):
     """在外部窗口里调用：action = wall / trim / fillet，params 为 dict。"""
     transaction = Transaction(doc, u"装修贴面")
@@ -1033,12 +1393,32 @@ def run_action(doc, action, params):
                 params.get("thick_mm", 10.0),
                 params.get("radius_mm", 120.0),
                 params.get("material_id", ElementId.InvalidElementId),
-                params.get("both_sides", False))
+                params.get("side", u"outer"))
         elif action == "trim":
             created, failures = build_opening_trim(
                 params.get("openings") or [],
                 params.get("out_mm", 10.0),
                 params.get("border_mm", 10.0),
+                params.get("radius_mm", 120.0),
+                params.get("material_id", ElementId.InvalidElementId))
+        elif action == "sill":
+            created, failures = build_sill_board(
+                params.get("openings") or [],
+                params.get("out_mm", 20.0),
+                params.get("ear_mm", 40.0),
+                max(params.get("thick_mm", 40.0), 5.0),
+                params.get("material_id", ElementId.InvalidElementId))
+        elif action == "skirt":
+            created, failures = build_skirting(
+                params.get("walls") or [],
+                params.get("height_mm", 100.0),
+                max(params.get("border_mm", 12.0), 3.0),
+                params.get("material_id", ElementId.InvalidElementId),
+                params.get("side", u"outer"))
+        elif action == "edge":
+            created, failures = build_edge_round(
+                params.get("walls") or [],
+                params.get("picks") or [],
                 params.get("radius_mm", 120.0),
                 params.get("material_id", ElementId.InvalidElementId))
         elif action == "fillet":
@@ -1059,6 +1439,25 @@ def run_action(doc, action, params):
             pass
         failures.append(traceback.format_exc().splitlines()[-1])
     return created, failures
+
+
+def pick_edges(count, prompt):
+    """在命令上下文里点选棱（选中即返回）。"""
+    references = []
+    for index in range(max(1, int(count))):
+        try:
+            reference = uidoc_ref().Selection.PickObject(
+                ObjectType.Edge, u"%s（%d/%d）" % (prompt, index + 1, count))
+        except Exception:
+            break
+        if reference is not None:
+            references.append(reference)
+    return references
+
+
+def uidoc_ref():
+    from pyrevit import revit as _revit
+    return _revit.uidoc
 
 
 def pick_faces_for_window(uidoc, count, prompt):

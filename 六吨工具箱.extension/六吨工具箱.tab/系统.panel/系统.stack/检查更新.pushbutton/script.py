@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
 """检查更新（只检查，不自动下载）
 
-  * 本地版本：扩展根目录的 version.json（{"version": "1.2.0"}）
-  * 远端版本：GitHub 仓库 main 分支的 version.json（多镜像轮询）
+  * 本地版本：扩展根目录的 version.json
+  * 远端版本：GitHub 仓库 main 分支的 version.json（多镜像轮询，每个 5 秒超时）
+  * 断网兜底：BUILTIN_LATEST 是发版时写进来的「已知最新版本」，
+    网络不通时也能告诉使用者「你大概是不是最新」。
 
-发现新版本时只提示并给出 GitHub 地址，由用户自行下载安装；
-不再自动下载、解压、覆盖，避免网络或文件操作把扩展弄坏。
+发现新版本只提示 + 给链接，由用户自己下载安装。
 """
 
 from __future__ import print_function
@@ -20,9 +21,15 @@ import clr
 
 clr.AddReference("System")
 
-from System.Net import SecurityProtocolType, ServicePointManager, WebClient
+from System import TimeSpan  # noqa: E402
+from System.IO import StreamReader  # noqa: E402
+from System.Net import (  # noqa: E402
+    HttpWebRequest,
+    SecurityProtocolType,
+    ServicePointManager,
+)
 
-from pyrevit import forms, script
+from pyrevit import forms, script  # noqa: E402
 
 output = script.get_output()
 
@@ -30,22 +37,32 @@ REPO_OWNER = "LIUsharkbee"
 REPO_NAME = "liudun-toolbox"
 BRANCH = "main"
 
+# 发版时同步更新这一行（断网兜底用）
+BUILTIN_LATEST = u"2.3.0"
+
 REPO_URL = "https://github.com/{0}/{1}".format(REPO_OWNER, REPO_NAME)
 RELEASES_URL = REPO_URL + "/releases"
-ARCHIVE_URL = REPO_URL + "/archive/refs/heads/{0}.zip".format(BRANCH)
 
 RAW_URL = "https://raw.githubusercontent.com/{0}/{1}/{2}/version.json".format(
     REPO_OWNER, REPO_NAME, BRANCH)
+API_URL = "https://api.github.com/repos/{0}/{1}/contents/version.json?ref={2}".format(
+    REPO_OWNER, REPO_NAME, BRANCH)
+JSDELIVR_URL = "https://cdn.jsdelivr.net/gh/{0}/{1}@{2}/version.json".format(
+    REPO_OWNER, REPO_NAME, BRANCH)
 
-# 国内实测：gh-proxy 系可用，raw / jsdelivr 多半不通，所以放后面
+# 依次尝试；国内实测 gh-proxy 系通常最先通
 VERSION_URLS = [
     "https://gh-proxy.com/" + RAW_URL,
     "https://ghfast.top/" + RAW_URL,
     "https://ghproxy.net/" + RAW_URL,
-    "https://api.github.com/repos/{0}/{1}/contents/version.json?ref={2}".format(
+    "https://raw.gitmirror.com/{0}/{1}/{2}/version.json".format(
         REPO_OWNER, REPO_NAME, BRANCH),
+    JSDELIVR_URL,
+    API_URL,
     RAW_URL,
 ]
+
+TIMEOUT_MS = 5000
 
 
 def safe_call(fn, default=None):
@@ -62,20 +79,28 @@ def enable_tls12():
         pass
 
 
-def download_text(url):
+def download_text(url, timeout_ms=TIMEOUT_MS):
     enable_tls12()
-    client = WebClient()
-    client.Headers["User-Agent"] = "liudun-toolbox-updater"
+    request = HttpWebRequest.Create(url)
+    request.Method = "GET"
+    request.UserAgent = "liudun-toolbox-updater"
+    request.Timeout = timeout_ms
+    request.ReadWriteTimeout = timeout_ms
+    request.AllowAutoRedirect = True
     try:
-        data = client.DownloadData(url)
-    finally:
-        safe_call(lambda: client.Dispose())
-    for encoding in ("utf-8-sig", "utf-8", "gbk"):
+        request.Proxy = None          # 绕过本机代理设置
+    except Exception:
+        pass
+    response = request.GetResponse()
+    try:
+        stream = response.GetResponseStream()
+        reader = StreamReader(stream)
         try:
-            return data.decode(encoding)
-        except Exception:
-            continue
-    return u""
+            return reader.ReadToEnd()
+        finally:
+            safe_call(lambda: reader.Dispose())
+    finally:
+        safe_call(lambda: response.Close())
 
 
 def extension_root():
@@ -111,7 +136,6 @@ def extract_version(text):
     if match:
         return match.group(1).strip()
 
-    # GitHub API：内容在 base64 里
     try:
         data = json.loads(text)
         content = data.get("content")
@@ -136,11 +160,11 @@ def remote_version():
                 continue
             version = extract_version(text)
             if version:
-                return version, u""
+                return version, errors
             errors.append(u"{0}: 未找到版本号".format(host))
         except Exception as ex:
             errors.append(u"{0}: {1}".format(host, ex))
-    return None, u"；".join(errors)
+    return None, errors
 
 
 def parse_version(text):
@@ -166,52 +190,68 @@ def open_url(url):
         return False
 
 
+def ask_open(message, title):
+    answer = forms.alert(message, title=title, yes=True, no=True)
+    return answer in (True, u"Yes", u"yes", u"是")
+
+
 def main():
     current = local_version()
+    builtin = BUILTIN_LATEST
+
     output.print_md(u"## 检查更新")
-    output.print_md(u"当前版本：**v{0}**，安装位置：`{1}`".format(
-        current, extension_root()))
+    output.print_md(u"当前版本：**v{0}**".format(current))
+    output.print_md(u"安装位置：`{0}`".format(extension_root()))
+    output.print_md(u"内置参考版本：v{0}（发版时写入）".format(builtin))
     output.print_md(u"正在读取远端版本…")
 
-    latest, error = remote_version()
-    if not latest:
-        output.print_md(u"无法获取远端版本：{0}".format(error or u"未知错误"))
-        forms.alert(
-            u"检查更新失败（网络受限）。\n\n可以手动打开仓库查看最新版本：\n{0}".format(
-                REPO_URL),
-            title=u"检查更新")
+    latest, errors = remote_version()
+
+    # ① 联网成功
+    if latest:
+        output.print_md(u"远端最新版本：**v{0}**".format(latest))
+        if parse_version(latest) <= parse_version(current):
+            output.print_md(u"已是最新版本。")
+            forms.alert(
+                u"当前 v{0}，远端 v{1}。\n\n已是最新版本。".format(current, latest),
+                title=u"检查更新")
+            return
+        message = (
+            u"发现新版本 v{0}（当前 v{1}）。\n\n"
+            u"请到 GitHub 下载后手动安装：\n{2}\n\n"
+            u"独立版：下载 liudun-toolbox-{0}-standalone.zip → 解压 → 运行「安装独立版.cmd」\n"
+            u"扩展版：下载 liudun-toolbox-{0}.zip → 解压 → 覆盖到\n"
+            u"%APPDATA%\\pyRevit\\Extensions\\ → 重启 Revit\n\n"
+            u"是否现在打开下载页面？").format(latest, current, RELEASES_URL)
+        if ask_open(message, u"发现新版本"):
+            if not open_url(RELEASES_URL):
+                forms.alert(u"无法自动打开浏览器，请手动访问：\n{0}".format(RELEASES_URL))
         return
 
-    output.print_md(u"远端最新版本：**v{0}**".format(latest))
-
-    if parse_version(latest) <= parse_version(current):
-        output.print_md(u"已是最新版本，无需更新。")
-        forms.alert(u"当前 v{0}，已是最新版本。".format(current),
-                    title=u"检查更新")
-        return
+    # ② 联网失败 → 用内置版本给结论，别让人一脸懵
+    detail = u"\n".join(errors[:4]) if errors else u"未知错误"
+    if parse_version(current) >= parse_version(builtin):
+        verdict = u"按内置参考版本判断：你**已经是最新**（v{0}）。".format(builtin)
+    else:
+        verdict = u"按内置参考版本判断：**有新版本 v{0}**，建议更新。".format(builtin)
 
     message = (
-        u"发现新版本 v{0}（当前 v{1}）。\n\n"
-        u"请到 GitHub 下载后手动安装：\n"
-        u"{2}\n\n"
-        u"安装方法：下载源码压缩包 → 解压 → 把 六吨工具箱.extension\n"
-        u"整个文件夹覆盖到：\n"
-        u"%APPDATA%\\pyRevit\\Extensions\\\n"
-        u"然后重启 Revit。\n\n"
-        u"是否现在打开下载页面？").format(latest, current, REPO_URL)
+        u"没连上 GitHub，无法确认线上最新版本。\n\n"
+        u"当前版本：v{0}\n内置参考版本：v{1}\n{2}\n\n"
+        u"仓库地址：\n{3}\n\n"
+        u"是否打开仓库页面（联网后看 README 顶部的版本号）？\n\n"
+        u"失败明细：\n{4}").format(current, builtin, verdict, REPO_URL, detail)
 
-    answer = forms.alert(message, title=u"发现新版本", yes=True, no=True)
-    if answer not in (True, u"Yes", u"yes", u"是"):
-        return
+    output.print_md(u"远端读取失败：\n```\n{0}\n```".format(detail))
+    output.print_md(verdict)
 
-    if open_url(REPO_URL):
-        output.print_md(u"已在浏览器打开：{0}".format(REPO_URL))
-    else:
-        forms.alert(u"无法自动打开浏览器，请手动访问：\n{0}".format(REPO_URL))
+    if ask_open(message, u"检查更新（离线）"):
+        if not open_url(REPO_URL):
+            forms.alert(u"无法自动打开浏览器，请手动访问：\n{0}".format(REPO_URL))
 
 
 try:
     main()
 except Exception:
     output.print_md(u"脚本出错：\n```\n{0}\n```".format(traceback.format_exc()))
-    forms.alert(u"脚本出错，详见输出窗口。", title=u"检查更新")
+    forms.alert(u"脚本出错：\n{0}".format(traceback.format_exc()[-500:]), title=u"检查更新")

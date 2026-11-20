@@ -412,11 +412,55 @@ def build_panel_on_face(element, face, material_id, thickness_mm):
     return True, u""
 
 
-def paint_walls(walls, material_id):
+SIDE_KEYS = [u"outer", u"inner", u"both"]
+
+
+def wall_exterior_normal(wall):
+    """Revit 约定：Wall.Orientation 指向墙外侧。"""
+    try:
+        orientation = wall.Orientation
+        flat = XYZ(orientation.X, orientation.Y, 0.0)
+        if flat.GetLength() > 1e-9:
+            return flat.Normalize()
+    except Exception:
+        pass
+    return None
+
+
+def pick_faces_by_side(wall, side):
+    """按 外侧 / 内侧 / 两面 挑竖直面。"""
+    faces = faces_for_element(wall, True, False)
+    if not faces:
+        return []
+    if side == u"both":
+        return faces
+    reference = wall_exterior_normal(wall)
+    if reference is None:
+        return faces[:1]
+    scored = []
+    for face in faces:
+        normal = None
+        try:
+            box = face.GetBoundingBox()
+            normal = face.ComputeNormal((box.Min + box.Max) * 0.5)
+        except Exception:
+            normal = None
+        dot = 0.0
+        if normal is not None:
+            try:
+                dot = normal.Normalize().DotProduct(reference)
+            except Exception:
+                dot = 0.0
+        scored.append((dot, face))
+    scored.sort(key=lambda row: row[0])
+    return [scored[0][1]] if side == u"inner" else [scored[-1][1]]
+
+
+def paint_walls(walls, material_id, side=u"outer"):
     painted = 0
     failed = []
     for wall in walls:
-        faces = faces_for_element(wall, True, False)
+        faces = pick_faces_by_side(wall, side)
         if not faces:
             failed.append(u"没有可刷的竖直面")
             continue
@@ -466,6 +510,12 @@ SHELL_XAML = u"""<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/pre
       <Button x:Name="btnPanel" Content="贴面（选中构件）" Height="28" Margin="0,0,6,6" Padding="14,2"/>
       <TextBlock Text="厚度" Margin="0,8,4,6" VerticalAlignment="Center" Opacity="0.8"/>
       <TextBox x:Name="boxThickness" Width="52" Height="28" Margin="0,0,10,6" Text="20"/>
+      <TextBlock Text="刷哪面" Margin="0,8,4,6" VerticalAlignment="Center" Opacity="0.8"/>
+      <ComboBox x:Name="sideBox" Width="88" Height="28" Margin="0,0,10,6" SelectedIndex="0">
+        <ComboBoxItem Content="外侧"/>
+        <ComboBoxItem Content="内侧"/>
+        <ComboBoxItem Content="两面"/>
+      </ComboBox>
       <Button x:Name="btnDiag" Content="诊断" Height="28" Margin="0,0,14,6" Padding="14,2"/>
       <CheckBox x:Name="chkColorOnly" Content="仅用主色" IsChecked="False" Margin="0,6,10,6" VerticalContentAlignment="Center"/>
     </WrapPanel>
@@ -505,11 +555,44 @@ SHELL_XAML = u"""<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/pre
                 <TextBlock Grid.Column="2" Text="封边宽度" VerticalAlignment="Center" Margin="0,0,8,0"/>
                 <TextBox Grid.Column="3" x:Name="trimBorder" Text="10" Height="28"/>
               </Grid>
-              <CheckBox x:Name="trimBoth" Content="墙的两面都做" IsChecked="False" Margin="0,0,0,8"/>
+              <Grid Margin="0,0,0,8">
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/>
+                  <ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+                <TextBlock Grid.Column="0" Text="窗台出挑" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                <TextBox Grid.Column="1" x:Name="sillOut" Text="20" Height="28" Margin="0,0,14,0"/>
+                <TextBlock Grid.Column="2" Text="耳朵(两端)" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                <TextBox Grid.Column="3" x:Name="sillEar" Text="40" Height="28"/>
+              </Grid>
+              <Grid Margin="0,0,0,8">
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/>
+                  <ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+                <TextBlock Grid.Column="0" Text="窗台厚" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                <TextBox Grid.Column="1" x:Name="sillThick" Text="40" Height="28" Margin="0,0,14,0"/>
+                <TextBlock Grid.Column="2" Text="踢脚高/厚" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                <StackPanel Grid.Column="3" Orientation="Horizontal">
+                  <TextBox x:Name="skirtH" Text="100" Height="28" Width="52"/>
+                  <TextBox x:Name="skirtT" Text="12" Height="28" Width="46" Margin="6,0,0,0"/>
+                </StackPanel>
+              </Grid>
+              <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                <TextBlock Text="贴哪一面" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                <ComboBox x:Name="trimSide" Width="110" Height="28" SelectedIndex="0">
+                  <ComboBoxItem Content="外侧"/>
+                  <ComboBoxItem Content="内侧"/>
+                  <ComboBoxItem Content="两面"/>
+                </ComboBox>
+              </StackPanel>
               <Button x:Name="btnTrimWall" Content="① 墙面贴面（用选中的墙，跟随真实轮廓）" Height="32" Margin="0,4,0,0"/>
               <Button x:Name="btnTrimOpening" Content="② 洞口封边（用选中的门窗）" Height="32" Margin="0,6,0,0"/>
               <Button x:Name="btnTrimPick" Content="③ 洞口封边（点洞口左右两个面）" Height="32" Margin="0,6,0,0"/>
               <Button x:Name="btnFilletFace" Content="④ 墙体倒圆角（选两面相邻的墙）" Height="32" Margin="0,6,0,0"/>
+              <Button x:Name="btnSill" Content="⑤ 窗台板 / 磨石台（用选中的门窗）" Height="32" Margin="0,6,0,0"/>
+              <Button x:Name="btnSkirt" Content="⑥ 踢脚线（用选中的墙）" Height="32" Margin="0,6,0,0"/>
+              <Button x:Name="btnEdge" Content="⑦ 边倒圆角（选墙后点竖直棱）" Height="32" Margin="0,6,0,0"/>
               <TextBlock x:Name="trimStatus" TextWrapping="Wrap" Margin="0,10,0,0"
                          FontSize="12" Opacity="0.85"/>
             </StackPanel>
@@ -835,6 +918,13 @@ class MaterialWindow(forms.WPFWindow):
         self.status.Text = text
         forms.alert(text, title=u"材质贴面")
 
+    def _side(self):
+        try:
+            index = int(self.FindName("sideBox").SelectedIndex)
+        except Exception:
+            index = 0
+        return SIDE_KEYS[max(0, min(2, index))]
+
     def _on_apply(self, sender, args):
         if not self.choice:
             forms.alert(u"先选一个材质或图片。")
@@ -860,7 +950,7 @@ class MaterialWindow(forms.WPFWindow):
 
         try:
             with revit.Transaction(u"按面刷"):
-                ok, failed = paint_walls(walls, material_id)
+                ok, failed = paint_walls(walls, material_id, self._side())
         except Exception:
             detail = traceback.format_exc()
             logger.error(detail)
@@ -900,7 +990,7 @@ class MaterialWindow(forms.WPFWindow):
             "thick_mm": self._trim_value("trimThick", 10.0),
             "radius_mm": self._trim_value("trimRadius", 120.0),
             "border_mm": self._trim_value("trimBorder", 10.0),
-            "both_sides": bool(self.FindName("trimBoth").IsChecked),
+            "side": SIDE_KEYS[max(0, min(2, int(self.FindName("trimSide").SelectedIndex)))],
         }
 
     def _trim_report(self, created, failures):
@@ -951,7 +1041,10 @@ class MaterialWindow(forms.WPFWindow):
                 ("btnTrimWall", u"墙面贴面", self._on_trim_wall),
                 ("btnTrimOpening", u"洞口封边", self._on_trim_opening),
                 ("btnTrimPick", u"点两面封边", self._on_trim_pick),
-                ("btnFilletFace", u"墙体倒圆角", self._on_fillet_face)):
+                ("btnFilletFace", u"墙体倒圆角", self._on_fillet_face),
+                ("btnSill", u"窗台板", self._on_sill),
+                ("btnSkirt", u"踢脚线", self._on_skirt),
+                ("btnEdge", u"边倒圆角", self._on_edge)):
             if name in self._bound:
                 continue
             try:
@@ -1080,6 +1173,56 @@ class MaterialWindow(forms.WPFWindow):
                 walls.append(element)
         return walls
 
+    def _material_id(self):
+        try:
+            material, _note = self._prepare_material()
+            if material is None:
+                return None
+            return safe_call(lambda: material.Id, None) or material
+        except Exception:
+            return None
+
+    def _on_sill(self, sender, args):
+        self._trace(u'点击 窗台板')
+        openings = self._openings_selected()
+        if not openings:
+            forms.alert(u"请先选中门或窗。", title=u"窗台板")
+            return
+        params = {
+            "openings": openings,
+            "out_mm": self._trim_value("sillOut", 20.0),
+            "ear_mm": self._trim_value("sillEar", 40.0),
+            "thick_mm": self._trim_value("sillThick", 40.0),
+            "material_id": self._material_id() or ElementId.InvalidElementId,
+        }
+        created, failures = trim_core.run_action(revit.doc, "sill", params)
+        self._trim_report(created, failures)
+
+    def _on_skirt(self, sender, args):
+        self._trace(u'点击 踢脚线')
+        walls = self._walls_selected()
+        if not walls:
+            forms.alert(u"请先选中墙。", title=u"踢脚线")
+            return
+        params = {
+            "walls": walls,
+            "height_mm": self._trim_value("skirtH", 100.0),
+            "border_mm": self._trim_value("skirtT", 12.0),
+            "side": SIDE_KEYS[max(0, min(2, int(self.FindName("trimSide").SelectedIndex)))],
+            "material_id": self._material_id() or ElementId.InvalidElementId,
+        }
+        created, failures = trim_core.run_action(revit.doc, "skirt", params)
+        self._trim_report(created, failures)
+
+    def _on_edge(self, sender, args):
+        self._trace(u'点击 边倒圆角')
+        self.action = "edge"
+        self.action_params = {
+            "radius_mm": self._trim_value("trimRadius", 120.0),
+            "material_id": self._material_id() or ElementId.InvalidElementId,
+        }
+        self.Close()
+
     def _on_fillet_face(self, sender, args):
         self._trace(u'点击 墙体倒圆角')
         if trim_core is None:
@@ -1137,6 +1280,13 @@ class MaterialWindow(forms.WPFWindow):
 
 
 def _perform_trim(uidoc, action, params):
+    if action == "edge":
+        params = dict(params)
+        references = trim_core.pick_edges(6, u"点竖直棱（可连续点，Esc 结束）")
+        if not references:
+            return 0, [u"没点到棱"]
+        params["picks"] = references
+        return trim_core.run_action(uidoc.Document, "edge", params)
     count = 2 if action == "trim_pick" else 1
     prompt = u"点洞口左右两个面" if action == "trim_pick" else u"点要倒圆角的面"
     picks = trim_core.pick_faces_for_window(uidoc, count, prompt)
@@ -1162,7 +1312,7 @@ def main():
         window.ShowDialog()
         action = getattr(window, "action", None)
         params = getattr(window, "action_params", None)
-        if action not in ("trim_pick", "fillet"):
+        if action not in ("trim_pick", "fillet", "edge"):
             break
         window = None
         try:

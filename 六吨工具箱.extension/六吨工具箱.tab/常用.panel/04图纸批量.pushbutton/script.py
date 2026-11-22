@@ -145,6 +145,60 @@ def copy_crop(source, target):
         log_line(u"[crop] 复制裁剪失败：%s" % traceback.format_exc().splitlines()[-1])
 
 
+def _usable_box(sheet, lr_mm, tb_mm):
+    """图纸上可用区域（单位：英尺，paper 坐标）。"""
+    outline = sheet.Outline
+    lr = lr_mm / FT_TO_MM
+    tb = tb_mm / FT_TO_MM
+    width = (outline.Max.U - outline.Min.U) - lr * 2.0
+    height = (outline.Max.V - outline.Min.V) - tb * 2.0
+    if width <= 0.1 or height <= 0.1:
+        return None
+    return outline, width, height
+
+
+CANDIDATE_SCALES = [20, 25, 30, 40, 50, 60, 75, 100, 125, 150, 200, 250, 300, 400, 500]
+
+
+def _fit_scale(view, usable_w, usable_h):
+    """按裁剪框尺寸挑一个能装进可用区域的整数比例（1:N）。"""
+    try:
+        box = view.CropBox
+        model_w = abs(box.Max.X - box.Min.X)
+        model_h = abs(box.Max.Y - box.Min.Y)
+    except Exception:
+        return None
+    if model_w <= 0 or model_h <= 0:
+        return None
+    need = max(model_w / usable_w, model_h / usable_h)
+    for candidate in CANDIDATE_SCALES:
+        if candidate >= need:
+            return candidate
+    return CANDIDATE_SCALES[-1]
+
+
+def _place_viewport(vp, view, sheet, lr_mm, tb_mm, title_mm, auto_fit):
+    """按边距把视图挪进图框，必要时自动挑比例。"""
+    box = _usable_box(sheet, lr_mm, tb_mm)
+    if box is None:
+        return
+    outline, usable_w, usable_h = box
+    if auto_fit:
+        target = _fit_scale(view, usable_w, usable_h)
+        if target:
+            try:
+                view.Scale = target
+            except Exception:
+                pass
+    center = XYZ((outline.Min.U + outline.Max.U) * 0.5,
+                 (outline.Min.V + outline.Max.V) * 0.5, 0.0)
+    shift_v = (title_mm / FT_TO_MM) - (tb_mm / FT_TO_MM) * 0.0
+    try:
+        vp.SetBoxCenter(XYZ(center.X, center.Y + shift_v, 0.0))
+    except Exception:
+        pass
+
+
 def sheet_center(sheet):
     try:
         outline = sheet.Outline
@@ -155,7 +209,13 @@ def sheet_center(sheet):
 
 
 def generate(level_ids, template_id, scale, copy_from_view, make_sheet,
-             title_block_id, number_prefix):
+             title_block_id, number_prefix, margins=None):
+    """margins: dict(lr=左右缩减mm, tb=上下缩减mm, title=标题下移mm, fit=bool 自动适配比例)"""
+    margins = margins or {}
+    lr_mm = float(margins.get("lr", 0.0))
+    tb_mm = float(margins.get("tb", 0.0))
+    title_mm = float(margins.get("title", 0.0))
+    auto_fit = bool(margins.get("fit", False))
     made = 0
     skipped = 0
     sheets = 0
@@ -209,7 +269,11 @@ def generate(level_ids, template_id, scale, copy_from_view, make_sheet,
                         sheet.Name = u"%s 平面" % safe_name(level)
                     except Exception:
                         pass
-                    Viewport.Create(doc, sheet.Id, view.Id, sheet_center(sheet))
+                    vp = Viewport.Create(doc, sheet.Id, view.Id, sheet_center(sheet))
+                    try:
+                        _place_viewport(vp, view, sheet, lr_mm, tb_mm, title_mm, auto_fit)
+                    except Exception:
+                        log_line(u"[margin] %s" % traceback.format_exc().splitlines()[-1])
                     sheets += 1
                 except Exception:
                     failures.append(u"%s 出图失败：%s" % (safe_name(level), traceback.format_exc().splitlines()[-1]))
@@ -224,7 +288,7 @@ def generate(level_ids, template_id, scale, copy_from_view, make_sheet,
 SHELL_XAML = u"""
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="图纸批量" Height="640" Width="560" MinWidth="520" MinHeight="520"
+        Title="图纸批量" Height="660" Width="640" MinWidth="600" MinHeight="540"
         WindowStartupLocation="CenterScreen" ResizeMode="CanResize">
   <Grid Margin="16">
     <Grid.RowDefinitions>
@@ -254,11 +318,18 @@ SHELL_XAML = u"""
       <ListBox x:Name="levelList" SelectionMode="Extended" Margin="2"/>
     </Border>
 
-    <StackPanel Grid.Row="3" Orientation="Horizontal" Margin="0,8,0,0">
+    <WrapPanel Grid.Row="3" Margin="0,8,0,0">
       <TextBlock Text="图框" VerticalAlignment="Center" Width="44"/>
-      <ComboBox x:Name="titleBlockBox" Width="300" Height="28" VerticalContentAlignment="Center"/>
-      <Button x:Name="btnAll" Content="全选" Width="64" Height="28" Margin="12,0,0,0"/>
-    </StackPanel>
+      <ComboBox x:Name="titleBlockBox" Width="240" Height="28" VerticalContentAlignment="Center"/>
+      <Button x:Name="btnAll" Content="全选" Width="64" Height="28" Margin="12,0,12,0"/>
+      <TextBlock Text="左右缩减" VerticalAlignment="Center" Margin="0,0,4,0"/>
+      <TextBox x:Name="lrBox" Text="0" Width="52" Height="28" VerticalContentAlignment="Center"/>
+      <TextBlock Text="上下" VerticalAlignment="Center" Margin="8,0,4,0"/>
+      <TextBox x:Name="tbBox" Text="0" Width="52" Height="28" VerticalContentAlignment="Center"/>
+      <TextBlock Text="标题下移" VerticalAlignment="Center" Margin="8,0,4,0"/>
+      <TextBox x:Name="titleBox" Text="0" Width="52" Height="28" VerticalContentAlignment="Center"/>
+      <CheckBox x:Name="fitBox" Content="自动适配比例" VerticalAlignment="Center" Margin="10,0,0,0"/>
+    </WrapPanel>
 
     <StackPanel Grid.Row="4" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
       <Button x:Name="btnGo" Content="生成" Width="104" Height="34" FontWeight="Bold" Margin="0,0,8,0"/>
@@ -267,6 +338,13 @@ SHELL_XAML = u"""
   </Grid>
 </Window>
 """
+
+
+def _to_float(text, default):
+    try:
+        return float(text)
+    except Exception:
+        return default
 
 
 class BatchWindow(forms.WPFWindow):
@@ -338,8 +416,14 @@ class BatchWindow(forms.WPFWindow):
             except Exception:
                 copy_from = None
         prefix_text = self.FindName("prefixBox").Text or u"A"
+        margins = {
+            "lr": _to_float(self.FindName("lrBox").Text, 0.0),
+            "tb": _to_float(self.FindName("tbBox").Text, 0.0),
+            "title": _to_float(self.FindName("titleBox").Text, 0.0),
+            "fit": bool(self.FindName("fitBox").IsChecked),
+        }
         self.result = generate(level_ids, template_id, scale, copy_from, make_sheet,
-                               block_id, prefix_text)
+                               block_id, prefix_text, margins)
         self.action = "done"
         self.Close()
 

@@ -263,6 +263,46 @@ def scan_libraries(libs):
     return items
 
 
+def recent_path():
+    return os.path.join(os.path.expanduser("~"), u"AppData", u"Roaming",
+                        u"六吨工具箱", u"family_recent.json")
+
+
+def load_recent():
+    try:
+        path = recent_path()
+        if not os.path.isfile(path):
+            return []
+        with io.open(path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        if isinstance(data, list):
+            return [u"%s" % item for item in data]
+    except Exception:
+        pass
+    return []
+
+
+def save_recent(paths):
+    try:
+        target = recent_path()
+        folder = os.path.dirname(target)
+        if not os.path.isdir(folder):
+            os.makedirs(folder)
+        with io.open(target, "w", encoding="utf-8") as handle:
+            handle.write(unicode(json.dumps(paths[:60], ensure_ascii=False)))
+    except Exception:
+        pass
+
+
+def push_recent(paths):
+    recent = load_recent()
+    merged = []
+    for item in list(paths) + recent:
+        if item not in merged:
+            merged.append(item)
+    save_recent(merged)
+
+
 def load_bitmap(path):
     bitmap = BitmapImage()
     bitmap.BeginInit()
@@ -286,7 +326,9 @@ SHELL_XAML = u"""<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/pre
       <RowDefinition Height="Auto"/>
     </Grid.RowDefinitions>
     <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,8">
-      <TextBox x:Name="searchBox" Width="240" Height="28" Margin="0,0,8,0"/>
+      <TextBox x:Name="searchBox" Width="200" Height="28" Margin="0,0,8,0"/>
+      <ComboBox x:Name="folderBox" Width="150" Height="28" Margin="0,0,6,0" VerticalContentAlignment="Center"/>
+      <CheckBox x:Name="recentBox" Content="最近用过" VerticalAlignment="Center" Margin="0,0,8,0"/>
       <Button x:Name="btnRefresh" Content="刷新" Height="28" Margin="0,0,6,0" Padding="12,2"/>
       <Button x:Name="btnAdd" Content="添加库目录..." Height="28" Margin="0,0,6,0" Padding="12,2"/>
       <Button x:Name="btnRemove" Content="移除该目录" Height="28" Margin="0,0,6,0" Padding="12,2"/>
@@ -361,10 +403,15 @@ class FamilyManagerWindow(forms.WPFWindow):
         self.first_error = None
 
         self.search_box = self.FindName("searchBox")
+        self.folder_box = self.FindName("folderBox")
+        self.recent_box = self.FindName("recentBox")
+        self.folder_names = []
         self.status = self.FindName("statusText")
         self.wrap = self.FindName("wrapPanel")
 
         self.search_box.TextChanged += self._on_search
+        self.folder_box.SelectionChanged += self._on_folder_changed
+        self.recent_box.Click += self._on_folder_changed
         self.FindName("btnRefresh").Click += self._on_refresh
         self.FindName("btnAdd").Click += self._on_add_lib
         self.FindName("btnRemove").Click += self._on_remove_lib
@@ -392,11 +439,53 @@ class FamilyManagerWindow(forms.WPFWindow):
         self.selected = {}
         self.items = scan_libraries(libs)
         self.limit = self.PAGE
+        self._fill_folders()
+        self._render()
+
+    def _fill_folders(self):
+        names = []
+        for item in self.items:
+            folder = item.get("folder") or u"<无目录>"
+            if folder not in names:
+                names.append(folder)
+        names.sort()
+        self.folder_names = names
+        try:
+            current = self.folder_box.SelectedIndex
+        except Exception:
+            current = 0
+        self.folder_box.Items.Clear()
+        self.folder_box.Items.Add(u"全部目录（%d）" % len(names))
+        for name in names:
+            self.folder_box.Items.Add(name)
+        try:
+            self.folder_box.SelectedIndex = current if current and current < self.folder_box.Items.Count else 0
+        except Exception:
+            self.folder_box.SelectedIndex = 0
+
+    def _on_folder_changed(self, sender, args):
+        self.limit = self.PAGE
         self._render()
 
     def _matches(self):
         keyword = (self.search_box.Text or u"").strip().lower()
-        return [i for i in self.items if not keyword or keyword in i["name"].lower()]
+        result = [i for i in self.items if not keyword or keyword in i["name"].lower()]
+        # 目录分类过滤
+        try:
+            index = self.folder_box.SelectedIndex
+            if index is not None and index > 0:
+                picked = self.folder_names[index - 1]
+                result = [i for i in result if i["folder"] == picked]
+        except Exception:
+            pass
+        # 最近使用过滤
+        try:
+            if self.recent_box.IsChecked:
+                recent = set(load_recent())
+                result = [i for i in result if i["path"] in recent]
+        except Exception:
+            pass
+        return result
 
     def _render(self):
         self.timer.Stop()
@@ -614,6 +703,8 @@ class FamilyManagerWindow(forms.WPFWindow):
             forms.alert(u"载入失败，详见输出窗口。", title=u"族管理器")
             return
 
+        if ok:
+            push_recent([item["path"] for item in items])
         text = u"载入成功 {0} 个".format(ok)
         if skipped:
             text += u"，跳过 {0}（已存在）".format(len(skipped))

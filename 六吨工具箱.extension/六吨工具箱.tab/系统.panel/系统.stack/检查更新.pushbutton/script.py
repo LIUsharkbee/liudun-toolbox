@@ -38,7 +38,7 @@ REPO_NAME = "liudun-toolbox"
 BRANCH = "main"
 
 # 发版时同步更新这一行（断网兜底用）
-BUILTIN_LATEST = u"2.3.0"
+BUILTIN_LATEST = u"2.3.1"
 
 REPO_URL = "https://github.com/{0}/{1}".format(REPO_OWNER, REPO_NAME)
 RELEASES_URL = REPO_URL + "/releases"
